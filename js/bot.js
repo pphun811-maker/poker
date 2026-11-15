@@ -38,8 +38,9 @@ MODULE BOUNDARY: Bot Decision Engine
 //   them by clustered evidence of weak hand quality, bad price, poor position, and unnecessary
 //   stack risk.
 // - Equity diagnostics, MDF, and range-defense reports are measurement layers, not autopilots.
-//   Price matters, but position, realization, stack pressure, hand class, and exploitability still
-//   shape the normal decision path.
+//   Real Monte Carlo equity (public-info only, js/botEquity.js) IS blended into postflop gate
+//   strength so decisions consume true win-and-tie probability; hand class, position, realization,
+//   stack pressure, and exploitability still shape the normal decision path around that blend.
 //
 // ACCEPTANCE CRITERIA:
 // - Judge changes by decision quality and strategic coherence, not by raw tightness or looseness.
@@ -61,6 +62,7 @@ MODULE BOUNDARY: Bot Decision Engine
 // Measure first, then change. Keep each pass focused enough that its effect can be understood.
 // A change is good only if it creates more plausible poker without breaking the core guardrails.
 
+import { estimateBotEquity } from "./botEquity.js";
 import { Card, Hand } from "./pokersolver.js";
 import { getPlayerActionState } from "./shared/actionModel.js";
 
@@ -92,6 +94,9 @@ const FLOP_AIR_DEFENDER_CALL_RELIEF = 0.03;
 if (SPEED_MODE) {
 	BOT_ACTION_DELAY = 0;
 	DEBUG_DECISIONS = true;
+	// Speedmode batches still exercise the equity path, but with fewer Monte Carlo samples so
+	// browser batch throughput stays usable.
+	setBotEquityConfig({ sampleCount: 300 });
 }
 
 export function setBotDecisionSink(sink) {
@@ -168,6 +173,10 @@ const COMMIT_INVEST_END = 0.6;
 const COMMIT_CALL_RATIO_REF = 0.25;
 const COMMITMENT_PENALTY_MAX = 0.25;
 const POSTFLOP_CALL_BARRIER = 0.16;
+// Real-equity blending for postflop decisions. Equity comes from js/botEquity.js (public-info-only
+// Monte Carlo) and is mixed with the hand-class strength ratio so the decision gates consume true
+// win-and-tie probability while keeping the tuned heuristic shape. 0 disables blending.
+const EQUITY_BLEND_WEIGHT = 0.6;
 const ELIMINATION_RISK_START = 0.25;
 const ELIMINATION_RISK_FULL = 0.8;
 const ELIMINATION_PENALTY_MAX = 0.25;
@@ -3385,10 +3394,25 @@ export function chooseBotAction(player, gameState) {
 		}
 	}
 	const privateAwareStrength = Math.min(1, strengthRatio + edgeBoost);
-	const gateStrengthRatio = preflop ? strengthRatio : privateAwareStrength;
+	// Postflop gate strength blends the hand-class ratio with true Monte Carlo equity (public-info
+	// only, see js/botEquity.js). Equity naturally accounts for opponent count, board texture, and
+	// draw potential, which the class heuristics only approximate; the blend keeps the tuned shape.
+	const postflopEquity = preflop ? null : estimateBotEquity({
+		holeCards: player.holeCards,
+		communityCards,
+		opponentCount: activeOpponents,
+	});
+	const equityBlendWeight = postflopEquity ? EQUITY_BLEND_WEIGHT : 0;
+	const equityAwareStrength = postflopEquity
+		? Math.min(1, Math.max(0,
+			equityBlendWeight * postflopEquity.equity +
+				(1 - equityBlendWeight) * privateAwareStrength,
+		))
+		: privateAwareStrength;
+	const gateStrengthRatio = preflop ? strengthRatio : equityAwareStrength;
 	const pairedBoardCallStrengthRatio = !preflop && pairedBoardPrivatePairTier === "weak"
 		? Math.min(
-			privateAwareStrength,
+			equityAwareStrength,
 			publicScore / 10 + Math.min(
 				publicHandRank === rawHandRank ? 0.02 : 0.08,
 				positiveEdge * (publicHandRank === rawHandRank ? 0.02 : 0.04),
@@ -5364,6 +5388,9 @@ export function chooseBotAction(player, gameState) {
 		strengthRatioRaw: toRoundedNumber(strengthRatio),
 		edgeBoost: toRoundedNumber(edgeBoost, 4),
 		privateAwareStrength: toRoundedNumber(privateAwareStrength),
+		equityPct: postflopEquity ? toRoundedNumber(postflopEquity.equity * 100) : null,
+		equityBlendWeight: postflopEquity ? toRoundedNumber(equityBlendWeight, 4) : null,
+		equityAwareStrength: toRoundedNumber(equityAwareStrength),
 		mRatio: toRoundedNumber(mRatio),
 		mZone,
 		potOdds: toRoundedNumber(potOdds),

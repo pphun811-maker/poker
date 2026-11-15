@@ -21,6 +21,7 @@ import {
 	runEngineTournament,
 } from "../js/gameEngine.js";
 import { chooseBotAction, normalizeBotActionRequest, setBotDecisionSink } from "../js/bot.js";
+import { setBotEquityConfig } from "../js/botEquity.js";
 import { getPlayerActionState } from "../js/shared/actionModel.js";
 import {
 	analyzeOutcomeLogs,
@@ -120,6 +121,12 @@ function parseArgs(args) {
 			exactMaxBoards: DEFAULT_EQUITY_EXACT_MAX_BOARDS,
 			approxBoards: DEFAULT_EQUITY_APPROX_BOARDS,
 		},
+		// Live-bot decision equity is off by default in batches to preserve the structural batch
+		// speed contract; pass --bot-equity=on to validate candidates with equity blending active.
+		botEquity: {
+			enabled: false,
+			samples: null,
+		},
 	};
 
 	for (const arg of args) {
@@ -146,6 +153,14 @@ function parseArgs(args) {
 			config.equity.exactMaxBoards = parsePositiveInteger(arg.slice(26), "equity exact max boards");
 		} else if (arg.startsWith("--equity-approx-boards=")) {
 			config.equity.approxBoards = parsePositiveInteger(arg.slice(23), "equity approximate boards");
+		} else if (arg.startsWith("--bot-equity=")) {
+			const mode = arg.slice(13);
+			if (mode !== "on" && mode !== "off") {
+				throw new Error(`Invalid bot-equity mode: ${mode}`);
+			}
+			config.botEquity.enabled = mode === "on";
+		} else if (arg.startsWith("--bot-equity-samples=")) {
+			config.botEquity.samples = parsePositiveInteger(arg.slice(21), "bot equity samples");
 		} else {
 			throw new Error(`Unknown argument: ${arg}`);
 		}
@@ -1135,6 +1150,12 @@ async function runSingleEngineBatch(config, runIndex, outputDir) {
 
 async function main() {
 	const args = parseArgs(Deno.args);
+	if (args.botEquity.enabled || args.botEquity.samples !== null) {
+		setBotEquityConfig({
+			enabled: args.botEquity.enabled,
+			sampleCount: args.botEquity.samples ?? undefined,
+		});
+	}
 	const projectRootUrl = new URL("../", import.meta.url);
 	const projectRootPath = Deno.realPathSync(projectRootUrl);
 	const outputDir = resolveOutputDir(args.outputDir);
@@ -1181,6 +1202,10 @@ async function main() {
 				maxDecisionsPerRun: args.equity.maxDecisionsPerRun,
 				exactMaxBoards: args.equity.exactMaxBoards,
 				approxBoards: args.equity.approxBoards,
+			},
+			botEquity: {
+				enabled: args.botEquity.enabled,
+				samples: args.botEquity.samples,
 			},
 		},
 		elapsedMs,
