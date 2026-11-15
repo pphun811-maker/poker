@@ -55,11 +55,14 @@
 
 - `equity.equityPct`：你的手牌对 `opponentCount` 个均匀随机手牌的胜+平率（蒙特卡洛，
   `stderrPct` 是采样误差）。可以把 `samples` 调大（上限 25000），反正没有出牌倒计时。
+- `equity.yourHand`：引擎评估的你当前成牌名（翻牌后非空）——**以它为准，不要自己读牌**。
+  上上局把 4-5-6-7 四连牌误读成顺子多送 1000，而 insights 的数字早就说明那不是顺子。
 - `economics.callBreakevenEquityPct`（=跟注保本胜率）：**equityPct 明显低于它时不要跟注**，
   还要给实现留出余量；equityPct 远高于它才考虑加注获取价值。
-- **`shoveWarning` 非空时（对手全下或需要投入超过 1/3 筹码）：这是服务端在警告你
-  随机 equity 已经不可信**——上一局就是拿着随机 equity 高的错觉用 K6o 跟了 5440 全下
-  输掉整场。按警告里的 15pp + premium 规则执行；拿不准就弃，锦标赛里活着比跟注值钱。
+- **`shoveWarning` 非空时（对手全下或需要投入超过 1/3 筹码）：随机 equity 已不可信——
+  第一局就是拿着随机 equity 的错觉用 K6o 跟了 5440 全下输掉整场。改用真实数学：
+  `shove.rangeEquityPct`（对顶部 20% 起手范围、Chen 排名）≥ `callBreakevenEquityPct` + 5
+  才考虑跟注，否则弃牌**（死 zone（mRatio < 3）按 push/fold 处理除外）。
 - `position.seatClass` / `playersBehind` / `actsLast`：位置。后面还有人没行动时，
   诈唬和薄价值下注要更保守；压轴行动（`actsLast`）可以放宽。
 - `reads[]`：对手公开画像（VPIP / PFR / 激进度 / 弃牌率 / 摊牌胜率 + `hints` 标签）。

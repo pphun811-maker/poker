@@ -14,7 +14,8 @@ MODULE BOUNDARY: Agent Insights Builder
 // DO NOT PUT HERE: gameState/worker access, deck or graveyard reads, HTTP routing, or any
 // projection of hidden information.
 
-import { estimatePublicEquity } from "../js/botEquity.js";
+import { estimatePublicEquity, estimateRangeEquity } from "../js/botEquity.js";
+import { Hand } from "../js/pokersolver.js";
 
 export const DEFAULT_INSIGHT_SAMPLES = 1000;
 export const MIN_INSIGHT_SAMPLES = 200;
@@ -317,6 +318,9 @@ function buildEquitySection(state, agent, samples) {
 		samples: estimate.samples,
 		opponentCount: estimate.opponentCount,
 		boardCardCount: board.length,
+		// Engine-evaluated made hand for the current board. The LLM misreads its own cards
+		// occasionally; this field is authoritative — trust it over any self-read.
+		yourHand: board.length >= 3 ? Hand.solve([...holeCards, ...board]).name : null,
 		// Privacy contract: opponent hands here are hypothetical samples from the public unseen-card
 		// pool (52 minus your hole cards minus the board). The engine deck and opponents' actual
 		// hole cards are never read; live opponent count is the only opponent-derived input.
@@ -324,10 +328,12 @@ function buildEquitySection(state, agent, samples) {
 	};
 }
 
-// Random-equity overstates calling equity against real shove ranges. Surfaces as a top-level
-// warning whenever the agent faces an all-in or a stack-heavy commitment, so the payload itself
-// tells the agent when the naive comparison (equityPct vs callBreakevenEquityPct) breaks down.
-function buildShoveWarning(state, agent, economics) {
+// Random-equity overstates calling equity against real shove ranges, so when the agent faces an
+// all-in or a stack-heavy commitment this section provides the honest math: equity vs the top
+// rangePercent of starting hands (Chen-ranked), which replaces the naive random-equity comparison.
+const SHOVE_RANGE_PERCENT = 20;
+
+function buildShoveSection(state, agent, economics, samples) {
 	if (!agent || state.gameFinished === true) {
 		return null;
 	}
@@ -344,10 +350,29 @@ function buildShoveWarning(state, agent, economics) {
 	if (!opponentAllIn && !stackHeavyCall) {
 		return null;
 	}
-	return "[WARN] 对手全下或你需要投入超过 1/3 筹码：equityPct 是对均匀随机手牌的胜率，" +
-		"会显著高估你对真实全下范围的胜率（全下范围通常只有牌谱顶部 15-25%）。" +
-		"除非 equityPct 比 callBreakevenEquityPct 高出至少 15 个百分点且你的手牌是 premium" +
-		"（99+/AQ+/AK 一类），否则弃牌；死 zone（mRatio < 3）按 push/fold 处理除外。";
+
+	const estimate = estimateRangeEquity({
+		holeCards: agent.holeCards ?? [],
+		communityCards: state.communityCards ?? [],
+		opponentCount: (state.players ?? []).filter((player) =>
+			player.seatIndex !== agentSeatIndex && player.folded !== true
+		).length,
+		rangePercent: SHOVE_RANGE_PERCENT,
+		sampleCount: samples,
+	});
+	const rangeEquityPct = estimate ? roundPct(estimate.equity) : null;
+
+	const warning = "[WARN] 对手全下或你需要投入超过 1/3 筹码：equityPct 是对均匀随机手牌的胜率，" +
+		"对真实全下范围严重偏高，不要用它做跟注判断。以 shove.rangeEquityPct 为准：" +
+		"rangeEquityPct >= callBreakevenEquityPct + 5 才考虑跟注，否则弃牌" +
+		"（死 zone（mRatio < 3）按 push/fold 处理除外）。";
+
+	return {
+		warning,
+		rangeEquityPct,
+		rangeAssumption: `opponents hold top ${SHOVE_RANGE_PERCENT}% of starting hands (Chen-ranked, hypothetical)`,
+		callBreakevenEquityPct: economics?.callBreakevenEquityPct ?? null,
+	};
 }
 
 export function buildInsights({ state, handResults, agentSeatIndex = 0, samples = DEFAULT_INSIGHT_SAMPLES }) {
@@ -358,6 +383,8 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 	const agent = getAgentPlayer(state) ?? (state.players ?? [])[0] ?? null;
 	const effectiveAgentSeatIndex = agent?.seatIndex ?? agentSeatIndex;
 	const economics = agent ? buildEconomics(state, agent) : null;
+	const clampedSamples = clampInsightSamples(samples);
+	const shove = agent ? buildShoveSection(state, agent, economics, clampedSamples) : null;
 
 	return {
 		ok: true,
@@ -373,11 +400,18 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 		},
 		economics,
 		position: agent ? buildPosition(state, agent) : null,
-		equity: agent ? buildEquitySection(state, agent, clampInsightSamples(samples)) : {
+		equity: agent ? buildEquitySection(state, agent, clampedSamples) : {
 			available: false,
 			reason: "no_agent_seat",
 		},
-		shoveWarning: buildShoveWarning(state, agent, economics),
+		shoveWarning: shove?.warning ?? null,
+		shove: shove
+			? {
+				rangeEquityPct: shove.rangeEquityPct,
+				rangeAssumption: shove.rangeAssumption,
+				callBreakevenEquityPct: shove.callBreakevenEquityPct,
+			}
+			: null,
 		// Per-opponent tendencies from public actions and showdown outcomes only.
 		reads: buildReads(handResults, effectiveAgentSeatIndex),
 	};

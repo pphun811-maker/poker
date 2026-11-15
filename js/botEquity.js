@@ -296,3 +296,183 @@ export function estimatePublicEquity({ holeCards, communityCards, opponentCount,
 function equityStderr(equity, iterations) {
 	return Math.sqrt((equity * (1 - equity)) / Math.max(1, iterations));
 }
+
+/* -----------------------------
+   Range-aware equity (all-in decisions)
+----------------------------- */
+
+// Chen-style preflop ranking kept local (bot.js imports this module; importing it back would be
+// circular). Good enough as a proxy ordering for "top N% starting hands".
+const CHEN_BASE = {
+	A: 10,
+	K: 8,
+	Q: 7,
+	J: 6,
+	T: 5,
+	"9": 4.5,
+	"8": 4,
+	"7": 3.5,
+	"6": 3,
+	"5": 2.5,
+	"4": 2,
+	"3": 1.5,
+	"2": 1,
+};
+
+function chenComboScore(cardA, cardB) {
+	let score = CHEN_BASE[cardA[0]] ?? 1;
+	if (cardA[0] === cardB[0]) {
+		score = Math.max(5, score * 2);
+	} else {
+		if (cardA[1] === cardB[1]) {
+			score += 2;
+		}
+		const high = Math.max(RANKS.indexOf(cardA[0]), RANKS.indexOf(cardB[0]));
+		const low = Math.min(RANKS.indexOf(cardA[0]), RANKS.indexOf(cardB[0]));
+		const gap = high - low - 1;
+		if (gap === 1) {
+			score -= 1;
+		} else if (gap === 2) {
+			score -= 2;
+		} else if (gap === 3) {
+			score -= 4;
+		} else if (gap >= 4) {
+			score -= 5;
+		}
+		if (gap <= 1 && high < RANKS.indexOf("Q")) {
+			score += 1;
+		}
+	}
+	return Math.max(0, score);
+}
+
+const rangeComboCache = new Map();
+
+// All 1326 hole-card combos sorted strongest-first, truncated to the requested percentile.
+function getRangeCombos(rangePercent) {
+	const clamped = Math.max(1, Math.min(100, Math.round(rangePercent)));
+	const cached = rangeComboCache.get(clamped);
+	if (cached) {
+		return cached;
+	}
+	const scored = [];
+	for (let i = 0; i < FULL_DECK.length; i++) {
+		for (let j = i + 1; j < FULL_DECK.length; j++) {
+			const cardA = FULL_DECK[i];
+			const cardB = FULL_DECK[j];
+			scored.push([cardA, cardB, chenComboScore(cardA, cardB)]);
+		}
+	}
+	scored.sort((a, b) => b[2] - a[2]);
+	const count = Math.max(1, Math.round((scored.length * clamped) / 100));
+	const list = scored.slice(0, count).map(([cardA, cardB]) => [cardA, cardB]);
+	rangeComboCache.set(clamped, list);
+	return list;
+}
+
+/**
+ * Equity against opponents holding hands from the top `rangePercent` of starting hands
+ * (Chen-ranked). This is the honest number for all-in decisions: a jam range is far tighter
+ * than uniform random, so random-equity overstates calling equity. Privacy contract unchanged:
+ * the range is public math, opponents are still hypothetical, and no engine state is read.
+ */
+export function estimateRangeEquity({
+	holeCards,
+	communityCards,
+	opponentCount,
+	rangePercent = 20,
+	sampleCount,
+}) {
+	if (!Array.isArray(holeCards) || holeCards.length !== 2) {
+		return null;
+	}
+	const board = Array.isArray(communityCards) ? communityCards : [];
+	if (board.length > 5) {
+		return null;
+	}
+	const liveOpponentCount = Math.max(0, Math.floor(opponentCount ?? 0));
+	if (liveOpponentCount === 0) {
+		return { equity: 1, samples: 0, opponentCount: 0, stderr: 0, rangePercent };
+	}
+	const iterations = Number.isFinite(sampleCount)
+		? Math.max(
+			MIN_VALID_SAMPLE_COUNT,
+			Math.min(MAX_TOOL_SAMPLE_COUNT, Math.floor(sampleCount)),
+		)
+		: DEFAULT_SAMPLE_COUNT;
+
+	const normalizedHole = holeCards.map(normalizeCard);
+	const normalizedBoard = board.map(normalizeCard);
+	const known = new Set([...normalizedHole, ...normalizedBoard]);
+	const unseen = [];
+	for (const card of FULL_DECK) {
+		if (!known.has(card)) {
+			unseen.push(card);
+		}
+	}
+	// Range combos that remain possible given the public cards.
+	const availableRange = getRangeCombos(rangePercent).filter(([a, b]) => !known.has(a) && !known.has(b));
+	const missingBoardCount = 5 - normalizedBoard.length;
+	if (availableRange.length < liveOpponentCount || unseen.length < missingBoardCount) {
+		return null;
+	}
+
+	const rangeWorking = availableRange.slice();
+	const unseenWorking = unseen.slice();
+	const heroPrefix = normalizedHole.concat();
+	const boardPrefix = normalizedBoard.concat();
+	let equitySum = 0;
+
+	for (let iteration = 0; iteration < iterations; iteration++) {
+		// Full shuffle: combos deeper in the list are needed to skip card conflicts.
+		partialShuffle(rangeWorking, rangeWorking.length);
+		const opponentHoles = [];
+		const taken = new Set();
+		for (const [cardA, cardB] of rangeWorking) {
+			if (opponentHoles.length === liveOpponentCount) {
+				break;
+			}
+			if (taken.has(cardA) || taken.has(cardB)) {
+				continue;
+			}
+			opponentHoles.push([cardA, cardB]);
+			taken.add(cardA);
+			taken.add(cardB);
+		}
+		if (opponentHoles.length < liveOpponentCount) {
+			continue;
+		}
+		// Board stays uniformly random over remaining cards (opponent ranges constrain only hands).
+		partialShuffle(unseenWorking, unseenWorking.length);
+		const runout = [];
+		for (const card of unseenWorking) {
+			if (runout.length === missingBoardCount) {
+				break;
+			}
+			if (!taken.has(card)) {
+				runout.push(card);
+				taken.add(card);
+			}
+		}
+		const fullBoard = missingBoardCount > 0 ? boardPrefix.concat(runout) : boardPrefix;
+
+		const heroHand = Hand.solve(heroPrefix.concat(fullBoard));
+		const opponentHands = [];
+		for (const hole of opponentHoles) {
+			opponentHands.push(Hand.solve(hole.concat(fullBoard)));
+		}
+		equitySum += countHeroShare(heroHand, opponentHands);
+	}
+
+	const equity = equitySum / iterations;
+	if (!Number.isFinite(equity)) {
+		return null;
+	}
+	return {
+		equity,
+		samples: iterations,
+		opponentCount: liveOpponentCount,
+		stderr: equityStderr(equity, iterations),
+		rangePercent: Math.max(1, Math.min(100, Math.round(rangePercent))),
+	};
+}

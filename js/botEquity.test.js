@@ -2,6 +2,7 @@ import {
 	estimateBotEquity,
 	estimateEquityForTest,
 	estimatePublicEquity,
+	estimateRangeEquity,
 	getBotEquityConfig,
 	setBotEquityConfig,
 } from "./botEquity.js";
@@ -181,4 +182,34 @@ Deno.test("estimatePublicEquity supports preflop spots for the agent tool", () =
 	assertAlmostEquals(equity.equity, 0.852, 0.02);
 	assertTrue(equity.stderr > 0 && equity.stderr < 0.01);
 	assertTrue(equity.samples === 20000);
+});
+
+Deno.test("range equity: AA dominates the top-20% range but less than random", () => {
+	const random = estimatePublicEquity({
+		holeCards: ["AS", "AD"],
+		communityCards: [],
+		opponentCount: 1,
+		sampleCount: 20000,
+	});
+	const range = estimateRangeEquity({
+		holeCards: ["AS", "AD"],
+		communityCards: [],
+		opponentCount: 1,
+		rangePercent: 20,
+		sampleCount: 20000,
+	});
+	assertAlmostEquals(range.equity, 0.81, 0.05);
+	assertTrue(range.equity < random.equity, "range equity must be below random equity");
+});
+
+Deno.test("range equity: K6o against a real jam range is a clear fold", () => {
+	const equity = estimateRangeEquity({
+		holeCards: ["KC", "6D"],
+		communityCards: [],
+		opponentCount: 1,
+		rangePercent: 20,
+		sampleCount: 20000,
+	});
+	// The game-1 fatal call: ~0.55 vs random but only ~0.43 vs a real shove range.
+	assertAlmostEquals(equity.equity, 0.43, 0.05);
 });
