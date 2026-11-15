@@ -331,7 +331,7 @@ def test_insights_endpoint(client):
         hand_results = 0
         seen_postflop_equity = False
         guard = 0
-        while hand_results < 4 and guard < 800:
+        while hand_results < 6 and guard < 800:
             guard += 1
             response = client.state(game_id, token, since=since, wait=True, wait_timeout_ms=600000)
             check(response.get("waitTimedOut") is not True, "event delivered for insights walk")
@@ -374,18 +374,24 @@ def test_insights_endpoint(client):
             action = "check" if action_state.get("canCheck") else "call"
             client.act(game_id, token, action)
 
-        check(seen_postflop_equity, "saw a postflop turn with live equity")
-
         # Reads are built from the hand_result stream, so they must exist once any hand completed,
         # regardless of whether the agent got an acting turn in later hands.
         insights = insights_request(client, game_id, token, samples=2000)
         audit_no_card_leaks(insights, "final insights payload")
+        equity_section = insights.get("equity") or {}
+        agent_busted = equity_section.get("available") is False and \
+            equity_section.get("reason") == "agent_busted_or_absent"
+        # A preflop all-in war can end every hand before the flop; if the agent busted that way,
+        # there was never a postflop turn to observe and that is a pass, not a failure.
+        check(seen_postflop_equity or agent_busted,
+              "postflop equity observed, or agent busted before any flop")
         if hand_results >= 1:
             reads = insights.get("reads") or []
             check(len(reads) >= 1, "reads populated after completed hands")
             for record in reads:
                 check(0 <= record.get("vpipPct", -1) <= 100, "reads vpipPct plausible")
-                check(record.get("seatIndex") != 0, "reads never include the agent seat")
+                check(record.get("seatIndex") != 0,
+                      f"reads never include the agent seat: {record}")
 
         # Sampling clamp: oversized request is capped, not rejected.
         insights = insights_request(client, game_id, token, samples=999999)

@@ -380,7 +380,11 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 		return { ok: false, reason: "no_state_yet", economics: null, position: null, equity: null, reads: [] };
 	}
 
-	const agent = getAgentPlayer(state) ?? (state.players ?? [])[0] ?? null;
+	// After the agent busts, the engine drops its seat from state.players entirely. Never guess an
+	// identity from array order (the engine rotates seat order every hand — players[0] can be any
+	// seat); fall back to the passed-in agentSeatIndex so reads keep excluding the agent seat.
+	const agent = getAgentPlayer(state);
+	const agentPresent = agent !== null;
 	const effectiveAgentSeatIndex = agent?.seatIndex ?? agentSeatIndex;
 	const economics = agent ? buildEconomics(state, agent) : null;
 	const clampedSamples = clampInsightSamples(samples);
@@ -398,11 +402,11 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 			handsUntilBlindIncrease: HANDS_PER_BLIND_LEVEL -
 				((state.handId ?? 0) % HANDS_PER_BLIND_LEVEL),
 		},
-		economics,
-		position: agent ? buildPosition(state, agent) : null,
-		equity: agent ? buildEquitySection(state, agent, clampedSamples) : {
+		economics: agentPresent ? economics : null,
+		position: agentPresent ? buildPosition(state, agent) : null,
+		equity: agentPresent ? buildEquitySection(state, agent, clampedSamples) : {
 			available: false,
-			reason: "no_agent_seat",
+			reason: "agent_busted_or_absent",
 		},
 		shoveWarning: shove?.warning ?? null,
 		shove: shove
