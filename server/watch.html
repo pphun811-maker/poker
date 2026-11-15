@@ -1,0 +1,516 @@
+<!DOCTYPE HTML>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8">
+		<meta name='viewport' content='width=device-width, initial-scale=1.0'>
+		<title>Agent Poker · 观战</title>
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=Secular+One&display=swap" rel="stylesheet">
+		<link rel="stylesheet" href="/css/style.css">
+		<style>
+		/* Spectator-only additions on top of the original stylesheet (original palette only). */
+		body {
+			margin: 0;
+			display: flex;
+			flex-direction: row;
+			align-items: stretch;
+			overflow: hidden;
+			height: 100dvh;
+		}
+
+		main.watch {
+			width: auto;
+			flex: 1;
+			padding: 0 2vw;
+		}
+
+		main.wide {
+			grid-template-columns: repeat(var(--watch-cols, 3), 1fr);
+		}
+
+		main.wide #table-middle {
+			grid-area: 2 / 1 / 3 / -1;
+		}
+
+		/* The original stylesheet pins `aside` absolutely and centers it via transform; undo both. */
+		#watch-side {
+			position: static;
+			transform: none;
+			width: 300px;
+			flex: 0 0 300px;
+			display: flex;
+			flex-direction: column;
+			background-color: var(--blue-darker);
+			box-shadow: var(--shadow);
+			padding: 1rem;
+			gap: 0.6rem;
+			overflow: hidden;
+		}
+
+		#watch-side h2 {
+			margin: 0;
+			font-size: 1rem;
+			color: var(--yellow);
+		}
+
+		#action-log {
+			flex: 1;
+			overflow-y: auto;
+			font-size: 0.85rem;
+			line-height: 1.8;
+		}
+
+		#action-log .log-line {
+			padding: 0 0.4rem;
+			border-radius: 4px;
+		}
+
+		#action-log .log-line.agent-line {
+			background-color: var(--blue);
+		}
+
+		#action-log .log-line.winner-line {
+			color: var(--yellow);
+		}
+
+		#action-log .log-phase {
+			color: var(--blue-lightest);
+			font-size: 0.75rem;
+			margin-top: 0.5rem;
+		}
+
+		#watch-status {
+			font-size: 0.75rem;
+			color: var(--blue-lightest);
+		}
+
+		#watch-banner {
+			position: fixed;
+			left: 50%;
+			top: 8vh;
+			transform: translateX(-50%);
+			background-color: var(--blue-darker);
+			border: 2px solid var(--yellow);
+			color: var(--yellow);
+			box-shadow: var(--shadow);
+			border-radius: 12px;
+			padding: 0.8rem 1.6rem;
+			font-size: 1.1rem;
+			display: none;
+			max-width: 70vw;
+			text-align: center;
+			z-index: 500;
+		}
+
+		main .seat.acting .hole-cards::after {
+			content: "";
+			position: absolute;
+			inset: -0.6vmin;
+			border: 0.35vmin solid var(--yellow);
+			border-radius: 1.2vmin;
+			animation: watch-pulse 1.2s ease-in-out infinite;
+		}
+
+		@keyframes watch-pulse {
+			0%,
+			100% {
+				opacity: 1;
+			}
+			50% {
+				opacity: 0.35;
+			}
+		}
+
+		#game-over {
+			position: fixed;
+			inset: 0;
+			background-color: hsla(0, 0%, 0%, 0.55);
+			display: none;
+			align-items: center;
+			justify-content: center;
+			z-index: 900;
+		}
+
+		#game-over .game-over-box {
+			text-align: center;
+			background-color: var(--blue-darker);
+			border: 2px solid var(--yellow);
+			border-radius: 14px;
+			padding: 2rem 3.4rem;
+		}
+
+		#game-over .game-over-title {
+			font-size: 1.2rem;
+			color: var(--yellow);
+		}
+
+		#game-over .game-over-champion {
+			font-size: 2.2rem;
+			margin: 0.6rem 0;
+		}
+		</style>
+	</head>
+
+	<body>
+		<main class="watch" id="poker-table">
+			<div id="table-middle">
+				<section class="infos">
+					<div id="pot">0</div>
+					<div id="notification">等待牌局数据…</div>
+				</section>
+				<section id="community-cards">
+					<div class="cardslot"></div>
+					<div class="cardslot"></div>
+					<div class="cardslot"></div>
+					<div class="cardslot"></div>
+					<div class="cardslot"></div>
+				</section>
+			</div>
+		</main>
+		<aside id="watch-side">
+			<h2>动作记录</h2>
+			<div id="action-log"></div>
+			<div id="watch-status"></div>
+		</aside>
+		<div id="watch-banner"></div>
+		<div id="game-over">
+			<div class="game-over-box">
+				<div class="game-over-title">锦标赛结束</div>
+				<div class="game-over-champion" id="champion-name">—</div>
+				<div id="game-over-note"></div>
+			</div>
+		</div>
+		<script>
+		"use strict";
+
+		const CARD_BACK = "cards/1B.svg";
+		const PHASE_NAMES = { preflop: "翻牌前", flop: "翻牌", turn: "转牌", river: "河牌", showdown: "摊牌" };
+		const ACTION_NAMES = { fold: "弃牌", check: "过牌", call: "跟注", raise: "加注", allin: "全下" };
+		const RENDER_SPACING_MS = 130;
+
+		const params = new URLSearchParams(location.search);
+		const gameId = params.get("game");
+		const token = params.get("token");
+		const seatEls = new Map();
+		let lastRevision = 0;
+		let stopped = false;
+
+		function el(id) {
+			return document.getElementById(id);
+		}
+
+		function sleep(ms) {
+			return new Promise((resolve) => setTimeout(resolve, ms));
+		}
+
+		function cardImg(code) {
+			const img = document.createElement("img");
+			img.className = "card";
+			img.src = code ? `cards/${code}.svg` : CARD_BACK;
+			img.alt = code ?? "back";
+			return img;
+		}
+
+		function chipStack(chips, startingChips) {
+			const visual = document.createElement("div");
+			visual.className = "stack-visual";
+			const ratio = startingChips > 0 ? chips / startingChips : 0;
+			const count = chips > 0 ? Math.max(1, Math.round(ratio * 10)) : 0;
+			for (let index = 0; index < 10; index++) {
+				const chip = document.createElement("img");
+				chip.src = "icons/chip.svg";
+				chip.alt = "";
+				chip.style.setProperty("--stack-index", String(index));
+				chip.style.display = index < count ? "block" : "none";
+				visual.append(chip);
+			}
+			return visual;
+		}
+
+		function buildSeat(player, startingChips) {
+			const seat = document.createElement("div");
+			seat.className = "seat";
+			seat.dataset.seatIndex = String(player.seatIndex);
+
+			const holeCards = document.createElement("div");
+			holeCards.className = "hole-cards";
+			const cardA = cardImg(null);
+			const cardB = cardImg(null);
+			holeCards.append(cardA, cardB);
+			const blindIcons = [
+				["dealer", "icons/dealer.svg"],
+				["small-blind", "icons/small-blind.svg"],
+				["big-blind", "icons/big-blind.svg"],
+			];
+			const blindEls = {};
+			for (const [kind, src] of blindIcons) {
+				const icon = document.createElement("img");
+				icon.className = `blind-icons hidden ${kind}`;
+				icon.src = src;
+				icon.alt = kind;
+				holeCards.append(icon);
+				blindEls[kind] = icon;
+			}
+
+			const name = document.createElement("h3");
+			name.textContent = player.name;
+
+			const chips = document.createElement("div");
+			chips.className = "chips";
+			chips.append(chipStack(player.chips, startingChips));
+			const values = document.createElement("div");
+			values.className = "stack-values";
+			const total = document.createElement("div");
+			total.className = "total";
+			const bet = document.createElement("div");
+			bet.className = "bet";
+			values.append(total, bet);
+			chips.append(values);
+
+			seat.append(holeCards, name, chips);
+			el("poker-table").append(seat);
+			return {
+				seat,
+				cardA,
+				cardB,
+				blindEls,
+				name,
+				total,
+				bet,
+				chipsEl: chips,
+				startingChips,
+				seatIndex: player.seatIndex,
+			};
+		}
+
+		function ensureSeats(state) {
+			const startingChips = Math.max(...state.players.map((player) => player.chips), 100);
+			const known = new Set(state.players.map((player) => player.seatIndex));
+			for (const [seatIndex, ref] of seatEls) {
+				if (!known.has(seatIndex)) {
+					ref.seat.remove();
+					seatEls.delete(seatIndex);
+				}
+			}
+			for (const player of state.players) {
+				if (!seatEls.has(player.seatIndex)) {
+					seatEls.set(player.seatIndex, buildSeat(player, startingChips));
+				}
+			}
+
+			const count = state.players.length;
+			const main = el("poker-table");
+			if (count > 6) {
+				const cols = Math.ceil(count / 2);
+				main.classList.add("wide");
+				main.style.setProperty("--watch-cols", String(cols));
+				state.players.slice().sort((a, b) => a.seatIndex - b.seatIndex).forEach((player, index) => {
+					const row = index < cols ? 1 : 3;
+					const col = index < cols ? index + 1 : index - cols + 1;
+					seatEls.get(player.seatIndex).seat.style.gridArea = `${row} / ${col} / ${row + 1} / ${col + 1}`;
+				});
+			} else {
+				main.classList.remove("wide");
+				main.style.removeProperty("--watch-cols");
+				for (const ref of seatEls.values()) {
+					ref.seat.style.gridArea = "";
+				}
+			}
+		}
+
+		function renderSeats(state) {
+			ensureSeats(state);
+			for (const player of state.players) {
+				const ref = seatEls.get(player.seatIndex);
+				if (!ref) {
+					continue;
+				}
+				ref.cardA.src = player.holeCards?.[0] ? `cards/${player.holeCards[0]}.svg` : CARD_BACK;
+				ref.cardB.src = player.holeCards?.[1] ? `cards/${player.holeCards[1]}.svg` : CARD_BACK;
+				ref.blindEls.dealer.classList.toggle("hidden", !player.dealer);
+				ref.blindEls["small-blind"].classList.toggle("hidden", !player.smallBlind);
+				ref.blindEls["big-blind"].classList.toggle("hidden", !player.bigBlind);
+				ref.seat.classList.toggle("folded", player.folded === true);
+				ref.seat.classList.toggle("acting", state.actorSeatIndex === player.seatIndex && !player.folded);
+				ref.total.textContent = String(player.chips);
+				ref.bet.textContent = String(player.roundBet);
+				ref.chipsEl.replaceChild(chipStack(player.chips, ref.startingChips), ref.chipsEl.firstChild);
+			}
+		}
+
+		function renderBoard(state) {
+			el("pot").textContent = String(state.pot);
+			const slots = el("community-cards").children;
+			for (let index = 0; index < 5; index++) {
+				const slot = slots[index];
+				slot.textContent = "";
+				if (state.communityCards[index]) {
+					slot.append(cardImg(state.communityCards[index]));
+				}
+			}
+			const phase = PHASE_NAMES[state.phase] ?? state.phase ?? "";
+			el("notification").textContent = `第 ${state.handId} 手 · ${phase} · 盲注 ${state.smallBlind}/${state.bigBlind}`;
+		}
+
+		function showBanner(text) {
+			const banner = el("watch-banner");
+			banner.textContent = text;
+			banner.style.display = text ? "block" : "none";
+		}
+
+		function renderLog(state, winners) {
+			const log = el("action-log");
+			log.textContent = "";
+			const actions = state.actions ?? [];
+			let lastPhase = null;
+			for (const action of actions) {
+				if (action.phase !== lastPhase) {
+					lastPhase = action.phase;
+					const phaseLine = document.createElement("div");
+					phaseLine.className = "log-phase";
+					phaseLine.textContent = `— ${PHASE_NAMES[action.phase] ?? action.phase} —`;
+					log.append(phaseLine);
+				}
+				const line = document.createElement("div");
+				line.className = "log-line";
+				if (action.seatIndex === state.agentSeatIndex) {
+					line.classList.add("agent-line");
+				}
+				const amountText = action.resolved?.amount > 0 ? ` ${action.resolved.amount}` : "";
+				line.textContent = `${action.name} ${ACTION_NAMES[action.resolved?.action] ?? ""}${amountText}`;
+				log.append(line);
+			}
+			for (const winnerText of winners ?? []) {
+				const line = document.createElement("div");
+				line.className = "log-line winner-line";
+				line.textContent = winnerText;
+				log.append(line);
+			}
+			log.scrollTop = log.scrollHeight;
+		}
+
+		function renderStatus(text) {
+			el("watch-status").textContent = `${text} · revision ${lastRevision}`;
+		}
+
+		function renderMessage(message) {
+			const state = message.state;
+			if (!state) {
+				return;
+			}
+			// The server exposes the message kind as `messageType` (not `type`).
+			if (message.messageType === "hand_result") {
+				renderSeats(state);
+				renderBoard(state);
+				const winners = (state.potResults ?? [])
+					.filter((potResult) => !potResult.isRefundOnly)
+					.map((potResult) =>
+						`${potResult.players.join(" & ")} 赢得 ${potResult.amount}${
+							potResult.hand ? `（${potResult.hand}）` : ""
+						}`
+					);
+				renderLog(state, winners);
+				showBanner(winners.length > 0 ? winners.join("；") : `第 ${state.handId} 手结束（无人摊牌）`);
+				const busted = (state.bustedPlayers ?? []).map((player) => player.name).join("、");
+				renderStatus(busted ? `出局：${busted}` : "");
+				return;
+			}
+			if (message.messageType === "turn") {
+				renderSeats(state);
+				renderBoard(state);
+				renderLog(state);
+				renderStatus("");
+				if (state.yourTurn) {
+					const needToCall = state.actionState?.needToCall ?? 0;
+					showBanner(`等待 Agent 决策…（${needToCall > 0 ? `需跟注 ${needToCall}` : "可免费过牌"}）`);
+				} else {
+					showBanner("");
+				}
+				return;
+			}
+			if (message.messageType === "game_over") {
+				renderSeats(state);
+				renderBoard(state);
+				showBanner("");
+				renderStatus("锦标赛结束");
+			}
+		}
+
+		function showGameOver(response) {
+			el("game-over").style.display = "flex";
+			el("champion-name").textContent = response.champion?.name ?? "—";
+			el("game-over-note").textContent = response.champion
+				? "刷新 /watch 或让 Agent 再开一局即可重新观战"
+				: response.status === "aborted"
+				? "游戏被中止"
+				: response.errorMessage ?? "";
+		}
+
+		async function watchGame() {
+			while (!stopped) {
+				let response;
+				try {
+					const url = `/games/${gameId}/state?token=${encodeURIComponent(token)}` +
+						`&since=${lastRevision}&wait=1&waitTimeout=600000`;
+					const res = await fetch(url);
+					if (res.status === 401 || res.status === 404) {
+						el("notification").textContent = `无法观战：HTTP ${res.status}（token 或 gameId 错误）`;
+						return;
+					}
+					response = await res.json();
+				} catch {
+					await sleep(1000);
+					continue;
+				}
+				if (response.waitTimedOut) {
+					continue;
+				}
+				// Burst messages arrive together; render them with a small delay so hands "animate".
+				await renderMessage(response);
+				lastRevision = response.revision;
+				// Only the terminal MESSAGE ends the stream: status may say "finished" while older
+				// messages are still waiting to be rendered (bot-only hands run synchronously).
+				if (["game_over", "error", "aborted"].includes(response.messageType)) {
+					await sleep(RENDER_SPACING_MS);
+					showGameOver(response);
+					stopped = true;
+					return;
+				}
+				await sleep(RENDER_SPACING_MS);
+			}
+		}
+
+		async function renderIndex() {
+			el("watch-side").style.display = "none";
+			try {
+				const data = await fetch("/games").then((r) => r.json());
+				if (data.games.length === 0) {
+					el("notification").textContent = "当前没有游戏。让 Agent 先 POST /games 创建一局，然后刷新本页。";
+					return;
+				}
+				el("notification").textContent = "";
+				for (const game of data.games) {
+					const row = document.createElement("div");
+					row.style.margin = "1rem 0";
+					const link = document.createElement("a");
+					link.href = game.watchUrl;
+					link.textContent = `▶ 观战 ${game.config.agentName} vs ${game.config.botCount} bots · ${game.status}` +
+						(game.champion ? ` · 冠军 ${game.champion.name}` : "");
+					link.style.color = "var(--yellow)";
+					row.append(link);
+					el("community-cards").append(row);
+				}
+			} catch {
+				el("notification").textContent = "无法连接服务器（/games）";
+			}
+		}
+
+		if (gameId && token) {
+			watchGame();
+		} else {
+			renderIndex();
+		}
+		</script>
+	</body>
+</html>
