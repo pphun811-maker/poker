@@ -49,12 +49,17 @@
 
 ### 决策辅助工具：`GET /games/{id}/insights?token=…&samples=N`
 
-轮到你时先调它——LLM 不擅长心算，让接口替你把数字算好：
+**每个行动轮都必须先调它，没有例外**——包括看似可以凭直觉 check/弃牌的局面。上一手
+查过的数字这一手已经失效：局面一变就要重新查。凭手感打牌是上一局输掉锦标赛的直接原因
+（96 个行动轮只查了 9 次）。LLM 不擅长心算，让接口替你把数字算好：
 
 - `equity.equityPct`：你的手牌对 `opponentCount` 个均匀随机手牌的胜+平率（蒙特卡洛，
-  `stderrPct` 是采样误差）。重要决策把 `samples` 调大（上限 25000），反正没有出牌倒计时。
+  `stderrPct` 是采样误差）。可以把 `samples` 调大（上限 25000），反正没有出牌倒计时。
 - `economics.callBreakevenEquityPct`（=跟注保本胜率）：**equityPct 明显低于它时不要跟注**，
   还要给实现留出余量；equityPct 远高于它才考虑加注获取价值。
+- **`shoveWarning` 非空时（对手全下或需要投入超过 1/3 筹码）：这是服务端在警告你
+  随机 equity 已经不可信**——上一局就是拿着随机 equity 高的错觉用 K6o 跟了 5440 全下
+  输掉整场。按警告里的 15pp + premium 规则执行；拿不准就弃，锦标赛里活着比跟注值钱。
 - `position.seatClass` / `playersBehind` / `actsLast`：位置。后面还有人没行动时，
   诈唬和薄价值下注要更保守；压轴行动（`actsLast`）可以放宽。
 - `reads[]`：对手公开画像（VPIP / PFR / 激进度 / 弃牌率 / 摊牌胜率 + `hints` 标签）。

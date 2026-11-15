@@ -150,6 +150,8 @@ curl -X POST http://127.0.0.1:8899/games/{id}/action \
   `spr` / `mRatio` / `stackCallRatio` / `committedRatio`。
 - `equity`：`equityPct`（对 `opponentCount` 个均匀随机手牌的胜+平率）、`stderrPct`、
   `samples`；牌未发 / 已弃牌 / 游戏结束时 `available=false` 并给 `reason`。
+- `shoveWarning`：对手全下或需要投入超过 1/3 筹码时非空——提醒"随机 equity 会高估
+  对真实全下范围的胜率"，附 15pp + premium 的跟注门槛规则；其余情况为 `null`。
 - `position`：`seatClass`（button/smallBlind/bigBlind/early/middle/cutoff）、
   `positionFactor`（0=先行动，1=压轴）、`playersBehind`、`actsLast`、`headsUp`。
 - `reads`：每个对手的公开行为画像——`hands` / `vpipPct` / `pfrPct` / `aggressionFactor` /

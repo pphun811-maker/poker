@@ -163,6 +163,9 @@ function buildReads(handResults, agentSeatIndex) {
 		const actions = handState.actions ?? [];
 		const nameToSeat = seatNameToSeatIndex(handState);
 		const seatsThisHand = new Set();
+		// VPIP/PFR are per-hand flags: a player raising twice in a preflop war still counts once.
+		const preflopEntered = new Set();
+		const preflopRaised = new Set();
 
 		for (const action of actions) {
 			const seatIndex = action.seatIndex;
@@ -190,11 +193,17 @@ function buildReads(handResults, agentSeatIndex) {
 				record.aggressiveActs += 1;
 			}
 			if (phase === "preflop" && (resolved === "call" || resolved === "raise" || resolved === "allin")) {
-				record.vpip += 1;
+				preflopEntered.add(seatIndex);
 			}
 			if (phase === "preflop" && (resolved === "raise" || resolved === "allin")) {
-				record.pfr += 1;
+				preflopRaised.add(seatIndex);
 			}
+		}
+		for (const seatIndex of preflopEntered) {
+			records.get(seatIndex).vpip += 1;
+		}
+		for (const seatIndex of preflopRaised) {
+			records.get(seatIndex).pfr += 1;
 		}
 
 		for (const potResult of handState.potResults ?? []) {
@@ -315,6 +324,32 @@ function buildEquitySection(state, agent, samples) {
 	};
 }
 
+// Random-equity overstates calling equity against real shove ranges. Surfaces as a top-level
+// warning whenever the agent faces an all-in or a stack-heavy commitment, so the payload itself
+// tells the agent when the naive comparison (equityPct vs callBreakevenEquityPct) breaks down.
+function buildShoveWarning(state, agent, economics) {
+	if (!agent || state.gameFinished === true) {
+		return null;
+	}
+	const needToCall = economics?.needToCall ?? 0;
+	const chips = agent.chips ?? 0;
+	if (needToCall <= 0 || chips <= 0) {
+		return null;
+	}
+	const agentSeatIndex = state.agentSeatIndex ?? 0;
+	const opponentAllIn = (state.players ?? []).some((player) =>
+		player.seatIndex !== agentSeatIndex && player.folded !== true && player.allIn === true
+	);
+	const stackHeavyCall = needToCall >= chips * 0.33;
+	if (!opponentAllIn && !stackHeavyCall) {
+		return null;
+	}
+	return "⚠️ 对手全下或你需要投入超过 1/3 筹码：equityPct 是对均匀随机手牌的胜率，" +
+		"会显著高估你对真实全下范围的胜率（全下范围通常只有牌谱顶部 15-25%）。" +
+		"除非 equityPct 比 callBreakevenEquityPct 高出至少 15 个百分点且你的手牌是 premium" +
+		"（99+/AQ+/AK 一类），否则弃牌；死 zone（mRatio < 3）按 push/fold 处理除外。";
+}
+
 export function buildInsights({ state, handResults, agentSeatIndex = 0, samples = DEFAULT_INSIGHT_SAMPLES }) {
 	if (!state) {
 		return { ok: false, reason: "no_state_yet", economics: null, position: null, equity: null, reads: [] };
@@ -322,6 +357,7 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 
 	const agent = getAgentPlayer(state) ?? (state.players ?? [])[0] ?? null;
 	const effectiveAgentSeatIndex = agent?.seatIndex ?? agentSeatIndex;
+	const economics = agent ? buildEconomics(state, agent) : null;
 
 	return {
 		ok: true,
@@ -335,12 +371,13 @@ export function buildInsights({ state, handResults, agentSeatIndex = 0, samples 
 			handsUntilBlindIncrease: HANDS_PER_BLIND_LEVEL -
 				((state.handId ?? 0) % HANDS_PER_BLIND_LEVEL),
 		},
-		economics: agent ? buildEconomics(state, agent) : null,
+		economics,
 		position: agent ? buildPosition(state, agent) : null,
 		equity: agent ? buildEquitySection(state, agent, clampInsightSamples(samples)) : {
 			available: false,
 			reason: "no_agent_seat",
 		},
+		shoveWarning: buildShoveWarning(state, agent, economics),
 		// Per-opponent tendencies from public actions and showdown outcomes only.
 		reads: buildReads(handResults, effectiveAgentSeatIndex),
 	};
