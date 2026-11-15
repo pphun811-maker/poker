@@ -513,9 +513,19 @@
 		========================== */
 
 		let submitting = false;
+		const HUMAN_BUTTON_IDS = ["hc-fold", "hc-check", "hc-call", "hc-raise-btn"];
+
+		function setHumanButtonsDisabled(disabled) {
+			for (const id of HUMAN_BUTTON_IDS) {
+				el(id).disabled = disabled;
+			}
+		}
 
 		function hideHumanControls() {
 			el("human-controls").style.display = "none";
+			// Re-enable so a stale disabled state can never survive into the next turn.
+			setHumanButtonsDisabled(false);
+			submitting = false;
 		}
 
 		async function submitHumanAction(action, amount) {
@@ -523,9 +533,7 @@
 				return;
 			}
 			submitting = true;
-			for (const id of ["hc-fold", "hc-check", "hc-call", "hc-raise-btn"]) {
-				el(id).disabled = true;
-			}
+			setHumanButtonsDisabled(true);
 			try {
 				const res = await fetch(`/games/${gameId}/action`, {
 					method: "POST",
@@ -580,6 +588,7 @@
 			el("hc-raise-btn").style.display = canRaise ? "" : "none";
 
 			controls.style.display = "flex";
+			setHumanButtonsDisabled(false);
 			showBanner(`轮到你出牌（需跟注 ${callAmount > 0 ? callAmount : "0，可过牌"}）`);
 		}
 
