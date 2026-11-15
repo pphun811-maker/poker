@@ -344,7 +344,7 @@ function buildShoveWarning(state, agent, economics) {
 	if (!opponentAllIn && !stackHeavyCall) {
 		return null;
 	}
-	return "⚠️ 对手全下或你需要投入超过 1/3 筹码：equityPct 是对均匀随机手牌的胜率，" +
+	return "[WARN] 对手全下或你需要投入超过 1/3 筹码：equityPct 是对均匀随机手牌的胜率，" +
 		"会显著高估你对真实全下范围的胜率（全下范围通常只有牌谱顶部 15-25%）。" +
 		"除非 equityPct 比 callBreakevenEquityPct 高出至少 15 个百分点且你的手牌是 premium" +
 		"（99+/AQ+/AK 一类），否则弃牌；死 zone（mRatio < 3）按 push/fold 处理除外。";
