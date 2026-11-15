@@ -20,6 +20,8 @@ const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_BOT_COUNT = 5;
 const DEFAULT_STARTING_CHIPS = 2000;
 const DEFAULT_AGENT_NAME = "Agent";
+const DEFAULT_HUMAN_NAME = "Human";
+const HUMAN_SEAT_INDEX = 1;
 const MAX_BOT_COUNT = 8;
 const MIN_STARTING_CHIPS = 100;
 const MAX_STARTING_CHIPS = 1000000;
@@ -61,6 +63,8 @@ function parseCreateGameBody(body) {
 		agentName: DEFAULT_AGENT_NAME,
 		botCount: DEFAULT_BOT_COUNT,
 		startingChips: DEFAULT_STARTING_CHIPS,
+		humanSeat: false,
+		humanName: DEFAULT_HUMAN_NAME,
 	};
 
 	if (body.agentName !== undefined) {
@@ -73,11 +77,30 @@ function parseCreateGameBody(body) {
 		}
 		config.agentName = name;
 	}
+	if (body.humanSeat !== undefined) {
+		if (typeof body.humanSeat !== "boolean") {
+			throw new RequestError("humanSeat must be a boolean");
+		}
+		config.humanSeat = body.humanSeat;
+	}
+	if (body.humanName !== undefined) {
+		if (typeof body.humanName !== "string") {
+			throw new RequestError("humanName must be a string");
+		}
+		const name = body.humanName.trim();
+		if (name.length === 0 || name.length > 40) {
+			throw new RequestError("humanName must be 1-40 characters");
+		}
+		config.humanName = name;
+	}
 	if (body.botCount !== undefined) {
-		if (!Number.isInteger(body.botCount) || body.botCount < 1 || body.botCount > MAX_BOT_COUNT) {
-			throw new RequestError(`botCount must be an integer in [1, ${MAX_BOT_COUNT}]`);
+		if (!Number.isInteger(body.botCount) || body.botCount < 0 || body.botCount > MAX_BOT_COUNT) {
+			throw new RequestError(`botCount must be an integer in [0, ${MAX_BOT_COUNT}]`);
 		}
 		config.botCount = body.botCount;
+	}
+	if (config.botCount === 0 && !config.humanSeat) {
+		throw new RequestError("botCount 0 requires humanSeat: true (agent + human heads-up table)");
 	}
 	if (body.startingChips !== undefined) {
 		if (
@@ -117,9 +140,17 @@ function buildInitialSnapshot(config) {
 		chips: config.startingChips,
 		isBot: false,
 	}];
+	if (config.humanSeat) {
+		players.push({
+			seatIndex: HUMAN_SEAT_INDEX,
+			name: config.humanName,
+			chips: config.startingChips,
+			isBot: false,
+		});
+	}
 	for (let index = 0; index < config.botCount; index++) {
 		players.push({
-			seatIndex: index + 1,
+			seatIndex: players.length,
 			name: `Bot ${index + 1}`,
 			chips: config.startingChips,
 			isBot: true,
@@ -149,10 +180,12 @@ function buildInitialSnapshot(config) {
 function createGame(config) {
 	const gameId = crypto.randomUUID();
 	const seatToken = crypto.randomUUID();
+	const humanSeatToken = config.humanSeat ? crypto.randomUUID() : null;
 	const sabBuffer = new SharedArrayBuffer(16);
 	const game = {
 		id: gameId,
 		seatToken,
+		humanSeatToken,
 		config,
 		sab: new Int32Array(sabBuffer),
 		messages: [{
@@ -181,6 +214,8 @@ function createGame(config) {
 		agentName: config.agentName,
 		botCount: config.botCount,
 		startingChips: config.startingChips,
+		humanSeat: config.humanSeat,
+		humanName: config.humanName,
 	});
 
 	games.set(gameId, game);
@@ -202,13 +237,22 @@ function handleWorkerMessage(game, message) {
 		game.handResults.push(message);
 	}
 
-	if (message.type === "turn" && message.state?.yourTurn === true) {
-		// Only agent turns create a pending decision; bot turns exist for the spectator stream.
-		game.pendingTurn = {
-			revision: message.revision,
-			actionState: message.state?.actionState ?? null,
-		};
-		game.turnInFlight = false;
+	if (message.type === "turn") {
+		// Remote seats (agent at 0, human at 1) create pending decisions; bot turns exist only for
+		// the spectator stream.
+		const pendingSeatIndex = message.state?.yourTurn === true
+			? 0
+			: message.state?.humanTurn === true
+			? message.state.actorSeatIndex
+			: null;
+		if (pendingSeatIndex !== null && pendingSeatIndex !== undefined) {
+			game.pendingTurn = {
+				revision: message.revision,
+				actionState: message.state?.actionState ?? null,
+				seatIndex: pendingSeatIndex,
+			};
+			game.turnInFlight = false;
+		}
 	} else if (message.type === "hand_result") {
 		game.pendingTurn = null;
 		game.turnInFlight = false;
@@ -270,9 +314,23 @@ function getGame(gameId) {
 }
 
 function requireToken(game, token) {
-	if (!token || token !== game.seatToken) {
+	if (!token || (token !== game.seatToken && token !== game.humanSeatToken)) {
 		throw new RequestError("Invalid or missing seat token", 401);
 	}
+}
+
+// Which seat a token controls: agent token → 0, human token → 1, anything else → null.
+function resolveSeatForToken(game, token) {
+	if (!token) {
+		return null;
+	}
+	if (token === game.seatToken) {
+		return 0;
+	}
+	if (game.humanSeatToken && token === game.humanSeatToken) {
+		return HUMAN_SEAT_INDEX;
+	}
+	return null;
 }
 
 function getLatestState(game) {
@@ -282,10 +340,11 @@ function getLatestState(game) {
 function buildStateResponse(game, deliveredMessage = null) {
 	const latest = game.messages[game.messages.length - 1];
 	// For long-poll deliveries the response must describe THE DELIVERED message: a bot turn in a
-	// burst must not claim yourTurn just because the next agent turn is already pending.
+	// burst must not claim yourTurn just because the next agent turn is already pending. yourTurn
+	// stays exclusive to the agent seat (seat 0); the human seat is signalled inside the state.
 	const responseYourTurn = deliveredMessage
 		? deliveredMessage.type === "turn" && deliveredMessage.state?.yourTurn === true
-		: game.pendingTurn !== null && game.status === "running";
+		: game.pendingTurn !== null && game.pendingTurn.seatIndex === 0 && game.status === "running";
 	return {
 		gameId: game.id,
 		status: game.status,
@@ -297,6 +356,33 @@ function buildStateResponse(game, deliveredMessage = null) {
 		yourTurn: responseYourTurn,
 		awaitingAction: game.turnInFlight === true,
 		state: deliveredMessage?.state ?? getLatestState(game),
+	};
+}
+
+// Token-scoped hole-card visibility for human-seat games. Showdown reveals are public; everything
+// else hides each remote seat's cards from every viewer except that seat's own token. Regular
+// games (no humanSeat) keep the historical behavior: the agent's cards are visible to its token
+// and to the spectator page it was shared with.
+function scopeStateForToken(state, game, token) {
+	if (!state || !game.humanSeatToken || state.hadShowdown === true) {
+		return state;
+	}
+	const viewerSeat = resolveSeatForToken(game, token);
+	const hiddenSeats = new Set();
+	if (viewerSeat !== 0) {
+		hiddenSeats.add(0);
+	}
+	if (viewerSeat !== HUMAN_SEAT_INDEX) {
+		hiddenSeats.add(HUMAN_SEAT_INDEX);
+	}
+	if (hiddenSeats.size === 0) {
+		return state;
+	}
+	return {
+		...state,
+		players: state.players.map((player) =>
+			hiddenSeats.has(player.seatIndex) ? { ...player, holeCards: undefined } : player
+		),
 	};
 }
 
@@ -373,7 +459,7 @@ function buildSubmittedAction(actionState, action, amount) {
 	}
 }
 
-function submitAction(game, body) {
+function submitAction(game, body, seatIndex) {
 	if (game.status !== "running") {
 		throw new RequestError(`game is ${game.status}, no action possible`, 409);
 	}
@@ -382,6 +468,9 @@ function submitAction(game, body) {
 	}
 	if (!game.pendingTurn) {
 		throw new RequestError("it is not your turn", 409);
+	}
+	if (game.pendingTurn.seatIndex !== seatIndex) {
+		throw new RequestError("it is not this seat's turn", 409);
 	}
 	// Optional optimistic-concurrency guard: the agent echoes the revision of the turn snapshot it
 	// decided on. A mismatch means the turn was already acted on or has advanced.
@@ -403,7 +492,9 @@ function submitAction(game, body) {
 	const { request, code } = buildSubmittedAction(actionState, body.action, body.amount);
 
 	console.log(
-		`ACT game=${game.id.slice(0, 8)} action=${body.action} amount=${body.amount ?? "-"} -> code=${code}`,
+		`ACT game=${game.id.slice(0, 8)} seat=${seatIndex} action=${body.action} amount=${
+			body.amount ?? "-"
+		} -> code=${code}`,
 	);
 	game.sab[SAB_ACTION_AMOUNT] = request.action === "raise" ? request.amount : 0;
 	game.sab[SAB_ACTION_CODE] = code;
@@ -554,6 +645,7 @@ async function handleRequest(request) {
 		return json_response({
 			gameId: game.id,
 			seatToken: game.seatToken,
+			humanSeatToken: game.humanSeatToken,
 			seatIndex: 0,
 			config: game.config,
 			revision: 0,
@@ -570,7 +662,9 @@ async function handleRequest(request) {
 				config: game.config,
 				champion: game.champion,
 				seatToken: game.seatToken,
+				humanSeatToken: game.humanSeatToken,
 				watchUrl: `/watch?game=${game.id}&token=${game.seatToken}`,
+				humanSeatUrl: game.humanSeatToken ? `/watch?game=${game.id}&token=${game.humanSeatToken}` : null,
 			})),
 		});
 	}
@@ -586,7 +680,8 @@ async function handleRequest(request) {
 		}
 
 		if (sub === "state" && request.method === "GET") {
-			requireToken(game, url.searchParams.get("token"));
+			const token = url.searchParams.get("token");
+			requireToken(game, token);
 			const since = getQueryInt(url, "since", null);
 			const wait = url.searchParams.get("wait") === "1";
 			let deliveredMessage = null;
@@ -605,38 +700,48 @@ async function handleRequest(request) {
 			if (wait && timedOut) {
 				response.waitTimedOut = true;
 			}
+			response.state = scopeStateForToken(response.state, game, token);
 			return json_response(response);
 		}
 
 		if (sub === "action" && request.method === "POST") {
 			const body = await readJsonBody(request);
-			requireToken(game, body?.token);
-			const result = submitAction(game, body ?? {});
+			const seatIndex = resolveSeatForToken(game, body?.token);
+			if (seatIndex === null) {
+				throw new RequestError("Invalid or missing seat token", 401);
+			}
+			const result = submitAction(game, body ?? {}, seatIndex);
 			return json_response(result);
 		}
 
 		if (sub === "history" && request.method === "GET") {
-			requireToken(game, url.searchParams.get("token"));
+			const token = url.searchParams.get("token");
+			requireToken(game, token);
 			return json_response({
 				gameId: game.id,
 				status: game.status,
 				champion: game.champion,
-				hands: game.handResults,
+				hands: game.handResults.map((hand) => ({
+					...hand,
+					state: scopeStateForToken(hand.state, game, token),
+				})),
 			});
 		}
 
 		if (sub === "insights" && request.method === "GET") {
-			requireToken(game, url.searchParams.get("token"));
+			const token = url.searchParams.get("token");
+			requireToken(game, token);
 			const samples = clampInsightSamples(
 				getQueryInt(url, "samples", DEFAULT_INSIGHT_SAMPLES),
 			);
 			// Built exclusively from sanitized state views + the hand_result stream; the equity
 			// estimator samples hypothetical hands from the public unseen pool and never touches
-			// the engine deck or opponents' actual holdings.
+			// the engine deck or opponents' actual holdings. Both remote seats may call it — the
+			// perspective (equity, reads) is always the CALLING seat's own public information.
 			return json_response(buildInsights({
 				state: getLatestState(game),
 				handResults: game.handResults,
-				agentSeatIndex: 0,
+				agentSeatIndex: resolveSeatForToken(game, token) ?? 0,
 				samples,
 			}));
 		}

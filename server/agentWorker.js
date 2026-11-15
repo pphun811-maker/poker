@@ -3,12 +3,13 @@ MODULE BOUNDARY: Agent Table Worker
 ================================================================================================== */
 
 // CURRENT STATE: Runs one agent-vs-bots game headlessly inside a Deno worker, reusing the untouched
-// pure engine and bot modules. Bot decisions run synchronously; the agent seat blocks the worker on
-// a SharedArrayBuffer until the HTTP server writes a decision, so an agent turn has no timer and can
-// take arbitrarily long. Every message posted to the main thread passes through a whitelist sanitizer
-// that never exposes other players' hole cards, the deck, or the graveyard.
-// PUT HERE: Game state construction, action provider wiring, agent decision wait loop, sanitized
-// snapshot building, and the hand loop.
+// pure engine and bot modules. Bot decisions run synchronously; remote seats (the HTTP agent at
+// seat 0 and, when enabled, the human seat at seat 1) block the worker on a SharedArrayBuffer until
+// the HTTP server writes a decision, so a remote turn has no timer and can take arbitrarily long.
+// Every message posted to the main thread passes through a whitelist sanitizer that never exposes
+// other players' hole cards, the deck, or the graveyard.
+// PUT HERE: Game state construction, action provider wiring, remote seat decision wait loop,
+// sanitized snapshot building, and the hand loop.
 // DO NOT PUT HERE: HTTP routing, seat tokens, request validation, or client-facing shaping.
 
 import {
@@ -26,6 +27,7 @@ import { chooseBotAction, normalizeBotActionRequest } from "../js/bot.js";
 import { getActionRequestForAmount, getPlayerActionState, normalizeActionAmount } from "../js/shared/actionModel.js";
 
 export const AGENT_SEAT_INDEX = 0;
+export const HUMAN_SEAT_INDEX = 1;
 export const MAX_HANDS = 10000;
 const MAX_STEPS_PER_HAND = 1000;
 const AGENT_WAIT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -42,6 +44,7 @@ let sab = null;
 let gameState = null;
 let liveActions = [];
 let snapshotRevision = 0;
+let humanSeatEnabled = false;
 
 function createPlayerStats() {
 	return {
@@ -89,12 +92,19 @@ function createPlayer(index, { name, isBot, startingChips }) {
 	};
 }
 
-function createGameState({ agentName, botCount, startingChips }) {
+function createGameState({ agentName, humanName, botCount, startingChips }) {
 	const players = [createPlayer(AGENT_SEAT_INDEX, {
 		name: agentName,
 		isBot: false,
 		startingChips,
 	})];
+	if (humanSeatEnabled) {
+		players.push(createPlayer(players.length, {
+			name: humanName ?? "Human",
+			isBot: false,
+			startingChips,
+		}));
+	}
 	for (let index = 0; index < botCount; index++) {
 		players.push(createPlayer(players.length, {
 			name: `Bot ${index + 1}`,
@@ -152,8 +162,9 @@ function buildPlayerView(player, { reveal = false } = {}) {
 		bigBlind: player.bigBlind === true,
 		isBot: player.isBot === true,
 	};
-	const isAgent = player.seatIndex === AGENT_SEAT_INDEX;
-	if (isAgent || reveal) {
+	const isSelfSeat = player.seatIndex === AGENT_SEAT_INDEX ||
+		(humanSeatEnabled && player.seatIndex === HUMAN_SEAT_INDEX);
+	if (isSelfSeat || reveal) {
 		view.holeCards = player.holeCards.slice();
 	}
 	return view;
@@ -165,6 +176,7 @@ function buildPlayersView({ reveal = false } = {}) {
 
 function buildStateView({
 	yourTurn = false,
+	humanTurn = false,
 	actionState = null,
 	reveal = false,
 	actorSeatIndex = null,
@@ -186,19 +198,22 @@ function buildStateView({
 		players: buildPlayersView({ reveal }),
 		actions: liveActions.slice(),
 		yourTurn,
+		humanTurn: humanTurn && humanSeatEnabled,
 		actionState,
 	};
 }
 
-// Posted before EVERY decision (bots included) so spectators see each action; yourTurn and
-// actionState are only set for the agent seat.
+// Posted before EVERY decision (bots included) so spectators see each action; yourTurn/humanTurn
+// and actionState are only set for the remote seats (agent seat 0, human seat 1).
 function postTurnSnapshot(player) {
 	const isAgent = player.seatIndex === AGENT_SEAT_INDEX;
-	const actionState = isAgent ? getPlayerActionState(gameState, player) : null;
+	const isHuman = humanSeatEnabled && player.seatIndex === HUMAN_SEAT_INDEX;
+	const actionState = isAgent || isHuman ? getPlayerActionState(gameState, player) : null;
 	postMessageToHost({
 		type: "turn",
 		state: buildStateView({
 			yourTurn: isAgent,
+			humanTurn: isHuman,
 			actionState: actionState ? { ...actionState } : null,
 			actorSeatIndex: player.seatIndex,
 		}),
@@ -351,7 +366,9 @@ function normalizeAgentRequest(player, request) {
 
 function actionProvider(_engineGameState, player) {
 	postTurnSnapshot(player);
-	if (player.seatIndex === AGENT_SEAT_INDEX) {
+	const isRemoteSeat = player.seatIndex === AGENT_SEAT_INDEX ||
+		(humanSeatEnabled && player.seatIndex === HUMAN_SEAT_INDEX);
+	if (isRemoteSeat) {
 		const decision = awaitAgentDecision();
 		const request = normalizeAgentRequest(player, decision);
 		const resolvedAction = resolveTurnAction(gameState, player, request);
@@ -400,6 +417,7 @@ function runTournament() {
 
 function startGame(startConfig) {
 	sab = new Int32Array(startConfig.sab);
+	humanSeatEnabled = startConfig.humanSeat === true;
 	gameState = createGameState(startConfig);
 	try {
 		runTournament();

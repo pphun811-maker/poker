@@ -315,6 +315,88 @@ def insights_request(client, game_id, token, samples=None):
     return client._request("GET", f"/games/{game_id}/insights?{query}")
 
 
+def test_human_seat_duel(client):
+    print("== human seat duel (agent vs human, heads-up) ==")
+    game_id = None
+    try:
+        game = client._request("POST", "/games", {
+            "agentName": "DuelAgent",
+            "botCount": 0,
+            "humanSeat": True,
+            "humanName": "Player1",
+            "startingChips": 1000,
+        })
+        game_id, agent_tok = game["gameId"], game["seatToken"]
+        human_tok = game.get("humanSeatToken")
+        check(human_tok and human_tok != agent_tok, "distinct human seat token issued")
+        state = game.get("state") or {}
+        check(len(state.get("players", [])) == 2, "heads-up table has exactly 2 seats")
+        check(any(p.get("name") == "Player1" for p in state.get("players", [])),
+              "human seat named from config")
+
+        try:
+            client._request("POST", "/games", {"agentName": "X", "botCount": 0, "startingChips": 500})
+            raise TestFailure("botCount 0 accepted without humanSeat")
+        except PokerApiError as error:
+            check(error.status == 400, "botCount 0 without humanSeat rejected (400)")
+
+        since = 0
+        hands_done = 0
+        scoped_ok = False
+        guard = 0
+        while hands_done < 2 and guard < 400:
+            guard += 1
+            resp = client.state(game_id, agent_tok, since=since, wait=True, wait_timeout_ms=600000)
+            check(resp.get("waitTimedOut") is not True, "duel event delivered")
+            since = resp.get("revision", since)
+            message_type = resp.get("messageType")
+            try:
+                audit_no_card_leaks(resp, "duel agent view",
+                                    allow_reveals=message_type == "hand_result", agent_seat=0)
+            except TestFailure:
+                print(json.dumps(resp, indent=1)[:3000])
+                raise
+            if message_type in ("game_over", "error", "aborted"):
+                break
+            if message_type == "hand_result":
+                hands_done += 1
+                continue
+            state = resp["state"]
+            if state.get("yourTurn"):
+                me = next((p for p in state["players"] if p["seatIndex"] == 0), {})
+                opponent = next((p for p in state["players"] if p["seatIndex"] != 0), {})
+                if me.get("holeCards") and not opponent.get("holeCards"):
+                    scoped_ok = True
+                try:
+                    client.act(game_id, human_tok, "call")
+                    raise TestFailure("human action accepted during agent turn")
+                except PokerApiError as error:
+                    check(error.status == 409, "human action rejected during agent turn (409)")
+                action_state = state.get("actionState") or {}
+                action = "check" if action_state.get("canCheck") else "call"
+                client.act(game_id, agent_tok, action)
+            elif state.get("humanTurn"):
+                me = next((p for p in state["players"] if p["seatIndex"] == 1), {})
+                opponent = next((p for p in state["players"] if p["seatIndex"] != 1), {})
+                if me.get("holeCards") and not opponent.get("holeCards"):
+                    scoped_ok = True
+                human_view = client.state(game_id, human_tok)
+                audit_no_card_leaks(human_view, "duel human view",
+                                    allow_reveals=False, agent_seat=1)
+                action_state = state.get("actionState") or {}
+                action = "check" if action_state.get("canCheck") else "call"
+                client.act(game_id, human_tok, action)
+
+        check(hands_done >= 1, "duel completed at least one full hand")
+        check(scoped_ok, "hole-card scoping verified from both seat views")
+    finally:
+        if game_id:
+            try:
+                client._request("DELETE", f"/games/{game_id}")
+            except Exception:
+                pass
+
+
 def test_insights_endpoint(client):
     print("== insights endpoint (LLM decision tool) ==")
     try:
@@ -445,6 +527,7 @@ def main():
         test_health_and_creation(client)
         test_unknown_game_404(client)
         test_insights_endpoint(client)
+        test_human_seat_duel(client)
         test_full_game_and_leak_audit(client)
         test_no_turn_timer(client)
         test_action_validation(client)

@@ -149,6 +149,53 @@
 			font-size: 2.2rem;
 			margin: 0.6rem 0;
 		}
+
+		/* Human-seat action bar (shown only while it is the human token's turn). */
+		#human-controls {
+			position: fixed;
+			left: 50%;
+			bottom: 3vh;
+			transform: translateX(-50%);
+			display: none;
+			align-items: center;
+			gap: 0.8rem;
+			background-color: var(--blue-darker);
+			border: 2px solid var(--yellow);
+			border-radius: 12px;
+			box-shadow: var(--shadow);
+			padding: 0.8rem 1.2rem;
+			z-index: 600;
+		}
+
+		#human-controls button {
+			font-size: 1rem;
+			padding: 0.45rem 1.1rem;
+			border-radius: 8px;
+			border: 1px solid var(--blue-lightest);
+			background-color: var(--blue);
+			color: inherit;
+			cursor: pointer;
+		}
+
+		#human-controls button:disabled {
+			opacity: 0.5;
+			cursor: default;
+		}
+
+		#human-controls button.primary {
+			border-color: var(--yellow);
+			color: var(--yellow);
+		}
+
+		#human-controls input[type="range"] {
+			width: 180px;
+		}
+
+		#human-controls #hc-raise-label {
+			font-size: 0.85rem;
+			min-width: 11rem;
+			color: var(--blue-lightest);
+		}
 		</style>
 	</head>
 
@@ -174,6 +221,14 @@
 			<div id="watch-status"></div>
 		</aside>
 		<div id="watch-banner"></div>
+		<div id="human-controls">
+			<button id="hc-fold" type="button">弃牌</button>
+			<button id="hc-check" type="button">过牌</button>
+			<button id="hc-call" type="button" class="primary">跟注 <span id="hc-call-amount"></span></button>
+			<input id="hc-raise" type="range" min="0" max="0" step="10" value="0">
+			<span id="hc-raise-label"></span>
+			<button id="hc-raise-btn" type="button" class="primary">加注</button>
+		</div>
 		<div id="game-over">
 			<div class="game-over-box">
 				<div class="game-over-title">锦标赛结束</div>
@@ -403,6 +458,7 @@
 			if (message.messageType === "hand_result") {
 				renderSeats(state);
 				renderBoard(state);
+				hideHumanControls();
 				const winners = (state.potResults ?? [])
 					.filter((potResult) => !potResult.isRefundOnly)
 					.map((potResult) =>
@@ -422,10 +478,14 @@
 				renderLog(state);
 				renderStatus("");
 				if (state.yourTurn) {
+					hideHumanControls();
 					const needToCall = state.actionState?.needToCall ?? 0;
 					showBanner(`等待 Agent 决策…（${needToCall > 0 ? `需跟注 ${needToCall}` : "可免费过牌"}）`);
+				} else if (state.humanTurn) {
+					renderHumanControls(state);
 				} else {
 					showBanner("");
+					hideHumanControls();
 				}
 				return;
 			}
@@ -433,6 +493,7 @@
 				renderSeats(state);
 				renderBoard(state);
 				showBanner("");
+				hideHumanControls();
 				renderStatus("锦标赛结束");
 			}
 		}
@@ -445,6 +506,88 @@
 				: response.status === "aborted"
 				? "游戏被中止"
 				: response.errorMessage ?? "";
+		}
+
+		/* ===========================
+		   Human-seat action controls
+		========================== */
+
+		let submitting = false;
+
+		function hideHumanControls() {
+			el("human-controls").style.display = "none";
+		}
+
+		async function submitHumanAction(action, amount) {
+			if (submitting) {
+				return;
+			}
+			submitting = true;
+			for (const id of ["hc-fold", "hc-check", "hc-call", "hc-raise-btn"]) {
+				el(id).disabled = true;
+			}
+			try {
+				const res = await fetch(`/games/${gameId}/action`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ token, action, amount: amount ?? null, turnRevision: lastRevision }),
+				});
+				if (!res.ok) {
+					const detail = await res.json().catch(() => ({}));
+					renderStatus(`出牌失败：HTTP ${res.status} ${detail.error ?? ""}`);
+					// A stale/rejected submission means the table moved on; the next stream message
+					// re-renders and the controls refresh on the next human turn.
+					hideHumanControls();
+				}
+			} catch (error) {
+				renderStatus(`出牌失败：${error}`);
+			} finally {
+				submitting = false;
+			}
+		}
+
+		function renderHumanControls(state) {
+			const controls = el("human-controls");
+			const actionState = state.actionState;
+			if (!state.humanTurn || !actionState) {
+				hideHumanControls();
+				return;
+			}
+
+			const callAmount = actionState.needToCall ?? 0;
+			const canCheck = actionState.canCheck === true;
+			el("hc-call").style.display = canCheck ? "none" : "";
+			el("hc-call-amount").textContent = canCheck ? "" : String(callAmount);
+			el("hc-check").style.display = canCheck ? "" : "none";
+
+			const minRaise = Math.max(actionState.minRaise ?? 0, 0);
+			const maxRaise = Math.max(actionState.maxRaiseAmount ?? minRaise, minRaise);
+			const slider = el("hc-raise");
+			slider.min = String(minRaise);
+			slider.max = String(maxRaise);
+			slider.step = "10";
+			slider.value = String(minRaise);
+			const roundBet = (state.players ?? []).find((player) => player.seatIndex === state.actorSeatIndex)?.roundBet ?? 0;
+			const label = () => {
+				const value = Number(slider.value);
+				el("hc-raise-label").textContent = `加注 +${value}（本街共 ${roundBet + value}）`;
+			};
+			slider.oninput = label;
+			label();
+			const canRaise = maxRaise > 0 && maxRaise >= minRaise;
+			slider.style.display = canRaise ? "" : "none";
+			el("hc-raise-label").style.display = canRaise ? "" : "none";
+			el("hc-raise-btn").style.display = canRaise ? "" : "none";
+
+			controls.style.display = "flex";
+			showBanner(`轮到你出牌（需跟注 ${callAmount > 0 ? callAmount : "0，可过牌"}）`);
+		}
+
+		function bindHumanControls() {
+			el("hc-fold").onclick = () => submitHumanAction("fold");
+			el("hc-check").onclick = () => submitHumanAction("check");
+			el("hc-call").onclick = () => submitHumanAction("call");
+			el("hc-raise-btn").onclick = () => submitHumanAction("raise", Number(el("hc-raise").value));
 		}
 
 		async function watchGame() {
@@ -507,6 +650,7 @@
 		}
 
 		if (gameId && token) {
+			bindHumanControls();
 			watchGame();
 		} else {
 			renderIndex();
