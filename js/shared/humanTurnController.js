@@ -71,11 +71,12 @@ function getSteppedActionAmount(currentAmount, actionState, sliderStep, directio
 export function createActionAmountControls({
 	actionButton,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton = null,
 	incrementButton = null,
 }) {
 	let currentActionState = null;
+	let amountBeforeEdit = "";
 
 	function setCurrentAmount(amount, { normalize = false } = {}) {
 		if (!currentActionState) {
@@ -88,8 +89,11 @@ export function createActionAmountControls({
 			: clampActionAmount(parsedAmount, currentActionState);
 
 		amountSlider.value = nextAmount;
-		sliderOutput.value = nextAmount;
-		sliderOutput.classList.toggle(
+		// Do not rewrite the text field while the user is typing in it.
+		if (document.activeElement !== amountInput) {
+			amountInput.value = nextAmount;
+		}
+		amountInput.classList.toggle(
 			"invalid",
 			isInvalidRaiseAmount(nextAmount, currentActionState),
 		);
@@ -102,6 +106,51 @@ export function createActionAmountControls({
 
 	function handleActionSliderChange() {
 		setCurrentAmount(Number.parseInt(amountSlider.value, 10), { normalize: true });
+	}
+
+	// While typing: sync slider and action button to the digits typed so far, but never touch the
+	// field text itself (intermediate values may be out of range until confirm).
+	function handleAmountInputInput() {
+		const typedAmount = Number.parseInt(amountInput.value.replace(/\D/g, ""), 10);
+		if (Number.isNaN(typedAmount)) {
+			return;
+		}
+		setCurrentAmount(typedAmount);
+	}
+
+	// Confirm path (change / blur / Enter): normalize the final value and write it back into the
+	// field; empty or non-numeric text falls back to the current legal amount.
+	function confirmAmountInput() {
+		if (!currentActionState) {
+			return;
+		}
+
+		const typedAmount = Number.parseInt(amountInput.value.replace(/\D/g, ""), 10);
+		if (Number.isNaN(typedAmount)) {
+			setCurrentAmount(Number.parseInt(amountSlider.value, 10), { normalize: true });
+		} else {
+			setCurrentAmount(typedAmount, { normalize: true });
+		}
+		amountInput.value = amountSlider.value;
+	}
+
+	function handleAmountInputFocus() {
+		amountBeforeEdit = amountSlider.value;
+		// Selecting the current amount lets typing replace it instead of appending.
+		amountInput.select();
+	}
+
+	function handleAmountInputKeydown(event) {
+		if (event.key === "Enter") {
+			event.preventDefault();
+			amountInput.blur();
+			return;
+		}
+		if (event.key === "Escape") {
+			amountInput.value = amountBeforeEdit;
+			setCurrentAmount(Number.parseInt(amountInput.value, 10));
+			amountInput.blur();
+		}
 	}
 
 	function stepAmount(direction) {
@@ -134,13 +183,18 @@ export function createActionAmountControls({
 	function init() {
 		amountSlider.addEventListener("input", handleActionSliderInput);
 		amountSlider.addEventListener("change", handleActionSliderChange);
+		amountInput.addEventListener("input", handleAmountInputInput);
+		amountInput.addEventListener("change", confirmAmountInput);
+		amountInput.addEventListener("blur", confirmAmountInput);
+		amountInput.addEventListener("focus", handleAmountInputFocus);
+		amountInput.addEventListener("keydown", handleAmountInputKeydown);
 		decrementButton?.addEventListener("click", handleDecrementClick);
 		incrementButton?.addEventListener("click", handleIncrementClick);
 	}
 
 	function clear() {
 		currentActionState = null;
-		sliderOutput.classList.remove("invalid");
+		amountInput.classList.remove("invalid");
 	}
 
 	function render(actionState, { actionStep = amountSlider.step, resetAmount = false } = {}) {
@@ -173,7 +227,7 @@ function createTurnActionUi({
 	foldButton,
 	actionButton,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton = null,
 	incrementButton = null,
 	actionStep = 10,
@@ -186,7 +240,7 @@ function createTurnActionUi({
 	const amountControls = createActionAmountControls({
 		actionButton,
 		amountSlider,
-		sliderOutput,
+		amountInput,
 		decrementButton,
 		incrementButton,
 	});
@@ -206,6 +260,7 @@ function createTurnActionUi({
 		foldButton.disabled = !enabled;
 		actionButton.disabled = !enabled;
 		amountSlider.disabled = !enabled;
+		amountInput.disabled = !enabled;
 		if (decrementButton) {
 			decrementButton.disabled = !enabled;
 		}
@@ -291,7 +346,7 @@ export function createHumanTurnController({
 	actionButton,
 	amountControls,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton = null,
 	incrementButton = null,
 	actionPollInterval = 1000,
@@ -319,7 +374,7 @@ export function createHumanTurnController({
 		foldButton,
 		actionButton,
 		amountSlider,
-		sliderOutput,
+		amountInput,
 		decrementButton,
 		incrementButton,
 		actionStep,
@@ -538,7 +593,7 @@ export function createSeatActionControls({
 	foldButton,
 	actionButton,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton = null,
 	incrementButton = null,
 	onActionError = null,
@@ -553,7 +608,7 @@ export function createSeatActionControls({
 		foldButton,
 		actionButton,
 		amountSlider,
-		sliderOutput,
+		amountInput,
 		decrementButton,
 		incrementButton,
 		actionStep,

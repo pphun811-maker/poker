@@ -146,18 +146,56 @@ curl -X POST http://127.0.0.1:8899/games/{id}/action \
 响应里没有任何对手底牌、牌堆、弃牌堆字段。
 
 - `samples`：蒙特卡洛采样数，默认 1000，范围 [200, 25000]；`stderrPct` 是采样误差。
+- `headline`：3-5 行关键摘要（翻前查表结论、随机/范围胜率、底池赔率、听牌出路、全下数学）。
 - `economics`：`needToCall` / `potOddsPct`（跟注价格）/ `callBreakevenEquityPct` /
   `spr` / `mRatio` / `stackCallRatio` / `committedRatio`。
+- `preflop`（仅翻前）：`handClass`（如 `A3s`）、`topPercent`（Chen 排名下的起手百分位）、
+  `spot`（unopened / facingLimp / facingRaise / facing3Bet / facingAllIn）、
+  `ranges`（按位置的开池/跟注/3bet/4bet/push 阈值）、`flags`（是否在范围内）、
+  `suggestedAction` 和一行 `rationale`。短码自动进入 push/fold 模式。面对加注/3bet
+  时，如果 `vsRangePct` 低于 `callBreakevenEquityPct`（1pp 容差），建议会直接改判
+  `fold`，不会只按静态查表线建议 call。
 - `equity`：`equityPct`（对 `opponentCount` 个均匀随机手牌的胜+平率）、`stderrPct`、
-  `samples`；牌未发 / 已弃牌 / 游戏结束时 `available=false` 并给 `reason`。
+  `samples`、`vsRangePct`（按公开动作 + VPIP/PFR 调整后的范围胜率）、`rangeSamples`、
+  `rangeOpponents`（每个对手被假设的范围宽度）；牌未发 / 已弃牌 / 游戏结束时
+  `available=false` 并给 `reason`。
+- `draws`（仅翻牌后）：`flushDraw` / `straightDraw`、`outs.clean`（去重后的干净出路）、
+  `breakevenOuts`（按底池赔率需要多少出路）、`nextCardCompletionPct` /
+  `byRiverCompletionPct`（完成听牌的概率，**不是对对手的胜率**）、
+  `callProfitableByPotOdds`。板面四同花且你手里无该花色时，`sharedBoardFlushSuit` 非空，
+  共享板花按 0 条干净出路计。听牌判断别再用 4×outs 心算。
+- `sizing`：`legal`（canCheck/needToCall/minRaise/maxRaiseAmount/maxAmount）、
+  `roundBet`、`potAfterCall`、`options[]`（min、1/3、1/2、2/3、满池、`cover shortest`
+  的 `amount` 与 `raiseToTotal`）。`amount` 是**新增投入**，`raiseToTotal` 是本街总额；
+  `cover shortest` 是把最短码对手一把罩住的加注量，避免用 `allin` 超下自己整墩。
 - `shoveWarning`：对手全下或需要投入超过 1/3 筹码时非空——提醒"随机 equity 会高估
-  对真实全下范围的胜率"，附 15pp + premium 的跟注门槛规则；其余情况为 `null`。
+  对真实全下范围的胜率"，附 `rangeEquityPct`（按对手 VPIP/PFR 动态调整）与
+  +5pp 的跟注门槛规则；其余情况为 `null`。
 - `position`：`seatClass`（button/smallBlind/bigBlind/early/middle/cutoff）、
   `positionFactor`（0=先行动，1=压轴）、`playersBehind`、`actsLast`、`headsUp`。
 - `reads`：每个对手的公开行为画像——`hands` / `vpipPct` / `pfrPct` / `aggressionFactor` /
   `folds*` / `showdowns` / `showdownWinRatePct` / `hints`（≥5 手后给 tight/loose/aggressive/
   passive 标签）。
 - `blinds`：当前盲注、`blindLevel`、`handsUntilBlindIncrease`（每 6 手涨盲）。
+
+隐私契约不变：`preflop` 只从你的底牌算出百分位；`draws` 只数公开牌 + 你的底牌；
+`vsRangePct` / `rangeOpponents` 仍是公开未知牌池的假设采样，不读引擎牌堆、弃牌堆或对手底牌。
+
+### `GET /games/{id}/report?token=…` — 服务端复盘审计
+
+打完一局后用它检查自己有没有按工具打牌。返回：
+
+- `decisions.total` / `withInsights` / `coveragePct`：每个出牌决策是否在其回合快照之后
+  调过 insights（服务端记录，不依赖客户端自报）。
+- `violations[]` / `flagCounts`：与工具数字矛盾的跟注——
+  `call_below_breakeven_equity`（`vsRangePct` 低于保本胜率）和
+  `call_below_shove_range_rule`（全下范围胜率不足保本 +5）。
+- `insightsCalls`：本局 insights 调用次数。
+- `hands[]`：每手盈亏、底池、赢家、是否摊牌、筹码变化。
+- `decisionLog`：最近 200 次决策的紧凑流水（动作、洞察数值、是否覆盖）。
+- `placement` / `finalChips` / `netChips`：名次与筹码结果。
+
+这是复盘工具，不是自动驾驶：它只把"你有没有违反自己查到的数字"标出来，是否偏离由你解释。
 
 ### `GET /watch` — 人类观战页面（原作 UI）
 
@@ -232,8 +270,10 @@ HTTP 请求 ──▶ server/main.js ──postMessage(白名单快照)──▶
 ## 测试
 
 ```sh
-python server/test_api.py      # 全流程：完整锦标赛、信息泄漏审计、12s 长思考、非法动作校验、中止
-deno test --allow-read=. js/gameEngine.test.js js/bot.test.js   # 原版引擎测试（未改动，应全绿）
+python -I server/test_api.py    # 全流程：完整锦标赛、信息泄漏审计、12s 长思考、非法动作校验、
+                                # insights 新字段、/report 审计、中止
+deno test server/insights.test.js  # 确定性单元测试：翻前表、听牌出路、尺寸器、动态范围
+deno test --allow-read=. js/       # 原版引擎 + bot equity 测试（70 绿）
 ```
 
 ## 想让 Agent 上场？

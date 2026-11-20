@@ -93,7 +93,7 @@ const actionControls = createSeatActionControls({
 	foldButton: singleFoldButton,
 	actionButton: singleActionButton,
 	amountSlider: singleAmountSlider,
-	sliderOutput: singleSliderOutput,
+	amountInput: singleSliderOutput,
 	decrementButton: singleAmountDecrementButton,
 	incrementButton: singleAmountIncrementButton,
 	onNewTurn: () => playTurnChime(),

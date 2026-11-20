@@ -56,7 +56,7 @@ const amountControls = document.getElementById("amount-controls");
 const amountDecrementButton = document.getElementById("amount-decrement-button");
 const amountSlider = document.getElementById("amount-slider");
 const amountIncrementButton = document.getElementById("amount-increment-button");
-const sliderOutput = document.querySelector("output");
+const amountInput = document.querySelector("output");
 const remoteSwitchLink = document.getElementById("remote-switch-link");
 const soundButton = document.getElementById("sound-button");
 const seatRefs = Array.from(document.querySelectorAll(".seat")).map((seatEl, seatSlot) => ({
@@ -113,7 +113,7 @@ const actionControls = createSeatActionControls({
 	foldButton,
 	actionButton,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton: amountDecrementButton,
 	incrementButton: amountIncrementButton,
 	onActionError: () => setNotification("Action request failed."),

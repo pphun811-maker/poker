@@ -4,6 +4,7 @@ import {
 	estimatePublicEquity,
 	estimateRangeEquity,
 	getBotEquityConfig,
+	getHandPercentile,
 	setBotEquityConfig,
 } from "./botEquity.js";
 
@@ -212,4 +213,16 @@ Deno.test("range equity: K6o against a real jam range is a clear fold", () => {
 	});
 	// The game-1 fatal call: ~0.55 vs random but only ~0.43 vs a real shove range.
 	assertAlmostEquals(equity.equity, 0.43, 0.05);
+});
+
+Deno.test("hand percentile is independent of hole-card order", () => {
+	const ato = getHandPercentile(["AS", "TD"]);
+	const tao = getHandPercentile(["TD", "AS"]);
+	assertAlmostEquals(ato, tao, 0.01, "ATo must score the same in either dealt order");
+	assertAlmostEquals(ato, 24.0, 1.0);
+
+	const a9o = getHandPercentile(["9D", "AS"]);
+	const a9oReversed = getHandPercentile(["AS", "9D"]);
+	assertAlmostEquals(a9o, a9oReversed, 0.01, "A9o must score the same in either dealt order");
+	assertAlmostEquals(a9o, 40.6, 1.0);
 });

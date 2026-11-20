@@ -10,9 +10,21 @@ Version log writing guide:
 - Add optional contributor credits as dedicated metadata instead of release notes.
 */
 
-export const APP_VERSION = "1.5.2";
+export const APP_VERSION = "1.6.0";
 
 export const VERSION_LOG = [
+	{
+		version: "1.6.0",
+		date: "2026-11-19",
+		title: "Career stats and table control upgrades",
+		notes: [
+			"Added a career stats page that keeps your long-term solo results and playing tendencies on this device.",
+			"The career button now stays available from the start screen, so past results survive a page refresh.",
+			"Bot names can now be renamed during a game, and the new name shows up everywhere it is displayed.",
+			"Replay now resets the table and waits for you to click Start before the next game is dealt.",
+		],
+		estimated: false,
+	},
 	{
 		version: "1.5.2",
 		date: "2026-08-22",

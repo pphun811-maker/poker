@@ -22,8 +22,11 @@ Imports
 
 import {
 	chooseBotAction,
+	clearBotActionQueue,
 	enqueueBotAction,
+	isBotActionPending,
 	normalizeBotActionRequest,
+	setBotActionErrorHandler,
 	setBotPlaybackFast,
 } from "./bot.js";
 import {
@@ -45,6 +48,7 @@ import {
 	getNextBettingRoundStep,
 	getNextPhasePlan,
 	getPlayerActionFollowUpEffects,
+	getPlayerTournamentPlacement,
 	getResolvedTurnContinuation,
 	getVisibleSolvedHand,
 	INITIAL_BIG_BLIND,
@@ -56,21 +60,18 @@ import {
 	resolveShowdown,
 	resolveTurnAction,
 } from "./gameEngine.js";
+import { createEmptyPlayerProfile, readPlayerProfile, savePlayerProfileResult } from "./playerProfile.js";
+import { renderPlayerProfile } from "./shared/playerProfileView.js";
 import QrCreator from "./qr-creator.js";
-import {
-	getActionButtonLabel,
-	getPlayerActionState,
-} from "./shared/actionModel.js";
+import { getActionButtonLabel, getPlayerActionState } from "./shared/actionModel.js";
 import { createHumanTurnController } from "./shared/humanTurnController.js";
-import { initSound, initSoundButton, playTurnChime } from "./shared/sound.js";
+import { applyStaticTranslations, getLang, onLangChange, setLang, t, tf } from "./i18n.js";
+import { buildPublicPlayerView, buildSyncView } from "./shared/syncViewModel.js";
 import {
-	buildPublicPlayerView,
-	buildSyncView,
-} from "./shared/syncViewModel.js";
-import {
-	clearSeatActionVisualState,
 	clearChipTransferAnimation,
 	clearRenderedSeat,
+	clearSeatActionLabel,
+	clearSeatActionVisualState,
 	renderChipStacks,
 	renderChipTransferAnimation,
 	renderCommunityCards as renderTableCommunityCards,
@@ -83,6 +84,7 @@ import {
 	renderSeatSetupState,
 } from "./shared/tableViewRenderer.js";
 import { initServiceWorker } from "./serviceWorkerRegistration.js";
+import { initCheatPanel, refreshCheatPanel } from "./cheatPanel.js";
 import { APP_VERSION, VERSION_LOG } from "./version.js";
 
 /* --------------------------------------------------------------------------------------------------
@@ -90,13 +92,8 @@ Configuration And DOM References
 ---------------------------------------------------------------------------------------------------*/
 
 const startButton = document.querySelector("#start-button");
-const newRoundControls = document.querySelector("#new-round-controls");
 const startButtonLabel = document.querySelector("#start-button-label");
-const newRoundCountdown = document.querySelector("#new-round-countdown");
-const newRoundCountdownValue = document.querySelector(
-	"#new-round-countdown-value",
-);
-const newRoundCancelButton = document.querySelector("#new-round-cancel-button");
+const replayButton = document.querySelector("#replay-button");
 const instructionsButton = document.querySelector("#instructions-button");
 const rotateIcons = document.querySelectorAll(".seat .rotate");
 const closeButtons = document.querySelectorAll(".close");
@@ -127,10 +124,23 @@ const resumeNewButton = document.querySelector("#resume-new-button");
 const statsOverlay = document.querySelector("#stats-overlay");
 const statsCloseButton = document.querySelector("#stats-close-button");
 const statsTableBody = document.querySelector("#stats-table-body");
+const profileButton = document.querySelector("#profile-button");
+const profileOverlay = document.querySelector("#profile-overlay");
+const profileCloseButton = document.querySelector("#profile-close-button");
+const profileElements = {
+	groups: document.querySelector("#profile-groups"),
+	history: document.querySelector("#profile-history-list"),
+	groupTemplate: document.querySelector("#profile-group-template"),
+	headingTemplate: document.querySelector("#profile-heading-template"),
+	rowTemplate: document.querySelector("#profile-row-template"),
+	cellTemplate: document.querySelector("#profile-cell-template"),
+	helpTemplate: document.querySelector("#profile-help-template"),
+	historyTemplate: document.querySelector("#profile-history-template"),
+};
 const logOverlay = document.querySelector("#log-overlay");
 const logCloseButton = document.querySelector("#log-close-button");
 const versionButton = document.querySelector("#version-button");
-const soundButton = document.querySelector("#sound-button");
+const langButton = document.querySelector("#lang-button");
 const versionOverlay = document.querySelector("#version-overlay");
 const versionCloseButton = document.querySelector("#version-close-button");
 const versionList = document.querySelector("#version-list");
@@ -138,12 +148,14 @@ const instructionsOverlay = document.querySelector("#instructions-overlay");
 const instructionsCloseButton = document.querySelector(
 	"#instructions-close-button",
 );
+const cheatOverlay = document.querySelector("#cheat-overlay");
+const cheatCloseButton = document.querySelector("#cheat-close-button");
 const logList = document.querySelector("#log-list");
 const amountSlider = document.querySelector("#amount-slider");
 const amountIncrementButton = document.querySelector(
 	"#amount-increment-button",
 );
-const sliderOutput = document.querySelector("output");
+const amountInput = document.querySelector("#amount-input");
 const seatRefs = Array.from(document.querySelectorAll(".seat")).map((
 	seatEl,
 	seatSlot,
@@ -177,6 +189,11 @@ const overlays = {
 		el: statsOverlay,
 		beforeOpen: () => renderStatsOverlay(),
 	},
+	profile: {
+		el: profileOverlay,
+		canOpen: () => playerProfile?.totals.tournaments > 0,
+		beforeOpen: () => renderPlayerProfile(profileElements, playerProfile),
+	},
 	resume: {
 		el: resumeGameOverlay,
 		blocking: true,
@@ -191,6 +208,10 @@ const overlays = {
 	},
 	instructions: {
 		el: instructionsOverlay,
+	},
+	cheat: {
+		el: cheatOverlay,
+		beforeOpen: () => refreshCheatPanel(),
 	},
 };
 
@@ -216,8 +237,6 @@ const FAST_FORWARD_CHIP_TRANSFER_DURATION = 160;
 const FAST_FORWARD_CHIP_TRANSFER_STEPS = 8;
 const DEFAULT_CHIP_TRANSFER_STEPS = 30;
 const WINNER_REACTION_DURATION = 2000;
-const NEW_ROUND_COUNTDOWN_SECONDS = 20;
-const NEW_ROUND_COUNTDOWN_INTERVAL = 1000;
 const SAVED_GAME_SCHEMA_VERSION = 1;
 const SAVED_GAME_STORAGE_KEY = "poker:saved-game:v1";
 
@@ -246,15 +265,45 @@ let stateSyncTimer = null;
 let stateSyncTimerDelay = null;
 let runoutPhaseTimer = null;
 let chipTransferFinishTimer = null;
-let newRoundCountdownTimer = null;
-let newRoundCountdownSeconds = 0;
+let lastGameSeatConfig = [];
+let startButtonLabelKey = "button.start";
+const CARD_BACK_CODE = "1B";
 let summaryButtonsVisible = false;
+let playerProfile = null;
+let currentTournamentId = null;
+let currentTournamentResultSaved = false;
 let handFastForwardActive = false;
+let cheatKeyBuffer = "";
 let autoplayToGameEnd = false;
 let nextChipTransferId = 1;
 let pendingSavedGameSnapshot = null;
 let currentFlowState = { type: "setup" };
 let currentGameSaveEligible = false;
+
+// Bot turn recovery: a queued bot action can be lost if its timer is dropped or if a
+// rare render/engine error throws before the next turn is scheduled. Keep the active
+// turn here so the watchdog can replay it (or apply a legal fallback) instead of
+// leaving the table frozen on one highlighted bot forever.
+const BOT_TURN_WATCHDOG_MS = 7000;
+const BOT_ERROR_LOG_LIMIT = 20;
+let activeBotTurn = null;
+const botDiagnostics = [];
+// Runout watchdog: set when a street is being advanced; cleared once setPhase()
+// finishes. A lost delay timer or an exception during the deal would otherwise
+// leave the table stuck with no active seat (e.g. four board cards before the river).
+let runoutWatchdog = null;
+
+function markRunoutStart() {
+	runoutWatchdog = {
+		at: Date.now(),
+		phaseIndex: gameState.currentPhaseIndex,
+		boardCount: gameState.communityCards.length,
+	};
+}
+
+function clearRunoutWatchdog() {
+	runoutWatchdog = null;
+}
 
 // --- Analytics --------------------------------------------------------------
 let totalHands = 0;
@@ -368,6 +417,8 @@ function createStatsSnapshot(stats = {}) {
 	return {
 		hands: normalizeNumber(stats.hands, 0),
 		handsWon: normalizeNumber(stats.handsWon, 0),
+		handsWonAfterFlop: normalizeNumber(stats.handsWonAfterFlop, 0),
+		flopsSeen: normalizeNumber(stats.flopsSeen, 0),
 		vpip: normalizeNumber(stats.vpip, 0),
 		pfr: normalizeNumber(stats.pfr, 0),
 		calls: normalizeNumber(stats.calls, 0),
@@ -407,20 +458,13 @@ function createPlayerSnapshot(player) {
 		winnerReactionUntil: normalizeNumber(player.winnerReactionUntil, 0),
 		isWinner: player.isWinner === true,
 		actionState: player.actionState ? { ...player.actionState } : null,
-		winProbability: typeof player.winProbability === "number"
-			? player.winProbability
+		winProbability: typeof player.winProbability === "number" ? player.winProbability : null,
+		lastNonFinalWinProbability: typeof player.lastNonFinalWinProbability === "number"
+			? player.lastNonFinalWinProbability
 			: null,
-		lastNonFinalWinProbability:
-			typeof player.lastNonFinalWinProbability === "number"
-				? player.lastNonFinalWinProbability
-				: null,
 		seatIndex: player.seatIndex,
-		holeCards: Array.isArray(player.holeCards)
-			? player.holeCards.slice(0, 2)
-			: [null, null],
-		visibleHoleCards: Array.isArray(player.visibleHoleCards)
-			? player.visibleHoleCards.slice(0, 2)
-			: [false, false],
+		holeCards: Array.isArray(player.holeCards) ? player.holeCards.slice(0, 2) : [null, null],
+		visibleHoleCards: Array.isArray(player.visibleHoleCards) ? player.visibleHoleCards.slice(0, 2) : [false, false],
 		dealer: player.dealer === true,
 		smallBlind: player.smallBlind === true,
 		bigBlind: player.bigBlind === true,
@@ -490,6 +534,8 @@ function createSavedGameSnapshot() {
 			totalHands,
 			hadHumansAtStart,
 			currentGameSaveEligible,
+			currentTournamentId,
+			currentTournamentResultSaved,
 			exitEventSent,
 			summaryButtonsVisible,
 			handFastForwardActive,
@@ -630,23 +676,16 @@ function normalizeSavedPlayer(player) {
 		name: typeof player?.name === "string" ? player.name : "Player",
 		isBot: player?.isBot === true,
 		seatSlot: normalizeNumber(player?.seatSlot, normalizeNumber(player?.seatIndex, 0)),
-		winnerReactionEmoji: typeof player?.winnerReactionEmoji === "string"
-			? player.winnerReactionEmoji
-			: "",
+		winnerReactionEmoji: typeof player?.winnerReactionEmoji === "string" ? player.winnerReactionEmoji : "",
 		winnerReactionUntil: normalizeNumber(player?.winnerReactionUntil, 0),
 		isWinner: player?.isWinner === true,
 		actionState: player?.actionState ? { ...player.actionState } : null,
-		winProbability: typeof player?.winProbability === "number"
-			? player.winProbability
+		winProbability: typeof player?.winProbability === "number" ? player.winProbability : null,
+		lastNonFinalWinProbability: typeof player?.lastNonFinalWinProbability === "number"
+			? player.lastNonFinalWinProbability
 			: null,
-		lastNonFinalWinProbability:
-			typeof player?.lastNonFinalWinProbability === "number"
-				? player.lastNonFinalWinProbability
-				: null,
 		seatIndex: normalizeNumber(player?.seatIndex, 0),
-		holeCards: Array.isArray(player?.holeCards)
-			? player.holeCards.slice(0, 2)
-			: [null, null],
+		holeCards: Array.isArray(player?.holeCards) ? player.holeCards.slice(0, 2) : [null, null],
 		visibleHoleCards: Array.isArray(player?.visibleHoleCards)
 			? player.visibleHoleCards.slice(0, 2)
 			: [false, false],
@@ -671,6 +710,11 @@ function restoreRuntimeState(runtimeState = {}) {
 	totalHands = normalizeNumber(runtimeState.totalHands, 0);
 	hadHumansAtStart = runtimeState.hadHumansAtStart === true;
 	currentGameSaveEligible = runtimeState.currentGameSaveEligible === true;
+	currentTournamentId = typeof runtimeState.currentTournamentId === "string" &&
+			runtimeState.currentTournamentId.length > 0
+		? runtimeState.currentTournamentId
+		: null;
+	currentTournamentResultSaved = runtimeState.currentTournamentResultSaved === true;
 	exitEventSent = false;
 	handFastForwardActive = runtimeState.handFastForwardActive === true;
 	autoplayToGameEnd = runtimeState.autoplayToGameEnd === true;
@@ -679,23 +723,17 @@ function restoreRuntimeState(runtimeState = {}) {
 	notifArr.splice(
 		0,
 		notifArr.length,
-		...(Array.isArray(runtimeState.notifications)
-			? runtimeState.notifications.slice(0, MAX_ITEMS)
-			: []),
+		...(Array.isArray(runtimeState.notifications) ? runtimeState.notifications.slice(0, MAX_ITEMS) : []),
 	);
 	pendingNotif.splice(
 		0,
 		pendingNotif.length,
-		...(Array.isArray(runtimeState.pendingNotifications)
-			? runtimeState.pendingNotifications
-			: []),
+		...(Array.isArray(runtimeState.pendingNotifications) ? runtimeState.pendingNotifications : []),
 	);
 
 	if (logList) {
 		logList.replaceChildren();
-		const logEntries = Array.isArray(runtimeState.logEntries)
-			? runtimeState.logEntries
-			: notifArr;
+		const logEntries = Array.isArray(runtimeState.logEntries) ? runtimeState.logEntries : notifArr;
 		logEntries.forEach((message) => {
 			const logEntry = document.createElement("div");
 			logEntry.textContent = message;
@@ -733,15 +771,9 @@ function restoreGameState(savedGameState) {
 		spectatorMode: savedGameState.spectatorMode === true,
 		raisesThisRound: normalizeNumber(savedGameState.raisesThisRound, 0),
 		handInProgress: savedGameState.handInProgress === true,
-		deck: Array.isArray(savedGameState.deck)
-			? savedGameState.deck.slice()
-			: INITIAL_DECK.slice(),
-		cardGraveyard: Array.isArray(savedGameState.cardGraveyard)
-			? savedGameState.cardGraveyard.slice()
-			: [],
-		communityCards: Array.isArray(savedGameState.communityCards)
-			? savedGameState.communityCards.slice()
-			: [],
+		deck: Array.isArray(savedGameState.deck) ? savedGameState.deck.slice() : INITIAL_DECK.slice(),
+		cardGraveyard: Array.isArray(savedGameState.cardGraveyard) ? savedGameState.cardGraveyard.slice() : [],
+		communityCards: Array.isArray(savedGameState.communityCards) ? savedGameState.communityCards.slice() : [],
 		players: activePlayers,
 		allPlayers,
 		chipTransfer: clonePlainValue(savedGameState.chipTransfer, null),
@@ -757,6 +789,7 @@ function restoreGameState(savedGameState) {
 }
 
 function resetRuntimeBeforeRestore() {
+	clearRunoutWatchdog();
 	if (notifTimer) {
 		clearTimeout(notifTimer);
 		notifTimer = null;
@@ -770,7 +803,6 @@ function resetRuntimeBeforeRestore() {
 		clearTimeout(runoutPhaseTimer);
 		runoutPhaseTimer = null;
 	}
-	clearNewRoundCountdown({ notify: false });
 	clearChipTransferFinishTimer();
 	clearChipTransferAnimation(tableRenderTarget);
 	humanTurnController.hide();
@@ -796,7 +828,7 @@ function renderRestoredGameState() {
 		renderSeatSetupState(getSeatRef(player), {
 			visible: true,
 			isBot: player.isBot,
-			nameEditable: false,
+			nameEditable: player.isBot === true,
 			controlsVisible: false,
 		});
 		renderPlayerSeat(player);
@@ -819,10 +851,11 @@ function renderRestoredGameState() {
 	updateFastForwardButton();
 	renderStatsOverlay();
 	syncLogUi();
+	syncCheatAndReplayButtons();
 	instructionsButton.classList.add("hidden");
 	startButton.classList.toggle("hidden", gameState.handInProgress === true);
 	if (!gameState.handInProgress) {
-		setStartButtonLabel("New Round");
+		setStartButtonLabel("button.newRound");
 	}
 }
 
@@ -840,6 +873,7 @@ function resumeRestoredFlow(flowState = {}) {
 		return;
 	}
 	if (flowState.type === "runout") {
+		markRunoutStart();
 		setPhase();
 		return;
 	}
@@ -863,9 +897,8 @@ function resumeRestoredFlow(flowState = {}) {
 
 	setCurrentFlowState({ type: "between-hands" });
 	setSummaryButtonsVisible(true);
-	setStartButtonLabel("New Round");
+	setStartButtonLabel("button.newRound");
 	startButton.classList.remove("hidden");
-	startNewRoundCountdown();
 	saveCurrentGameSnapshot();
 }
 
@@ -873,6 +906,15 @@ function restoreSavedGame(snapshot) {
 	resetRuntimeBeforeRestore();
 	restoreRuntimeState(snapshot.runtimeState);
 	restoreGameState(snapshot.gameState);
+	// allPlayers keeps busted seats, so replaying a restored game can revive
+	// the full original seat layout.
+	lastGameSeatConfig = gameState.allPlayers
+		.filter((player) => Number.isInteger(player.seatSlot))
+		.map((player) => ({
+			seatSlot: player.seatSlot,
+			name: player.name,
+			isBot: player.isBot,
+		}));
 	currentGameSaveEligible = hasExactlyOneHumanPlayer(gameState.players);
 	restoreTableUrl(snapshot.tableId);
 	renderRestoredGameState();
@@ -977,9 +1019,7 @@ function clearBotCheckRaiseIntent(player, reason) {
 }
 
 function clearBotCheckRaiseIntents(reason) {
-	gameState.players.forEach((player) =>
-		clearBotCheckRaiseIntent(player, reason)
-	);
+	gameState.players.forEach((player) => clearBotCheckRaiseIntent(player, reason));
 }
 
 function clearBotPassiveValueCheckIntent(player, reason) {
@@ -1005,9 +1045,7 @@ function clearBotPassiveValueCheckIntent(player, reason) {
 }
 
 function clearBotPassiveValueCheckIntents(reason) {
-	gameState.players.forEach((player) =>
-		clearBotPassiveValueCheckIntent(player, reason)
-	);
+	gameState.players.forEach((player) => clearBotPassiveValueCheckIntent(player, reason));
 }
 
 function buildSpeedmodeHandStartPlayers(players) {
@@ -1115,8 +1153,7 @@ function bindSeatRefPlayer(player) {
 	}
 	seatRef.playerSeatIndex = player.seatIndex;
 	seatRef.clearActionLabelState = () => clearPlayerActionState(player);
-	seatRef.clearWinnerReactionState = () =>
-		clearPlayerWinnerReactionState(player);
+	seatRef.clearWinnerReactionState = () => clearPlayerWinnerReactionState(player);
 }
 
 function buildPlayerSeatState(
@@ -1200,7 +1237,8 @@ function renderPlayerTotal(player) {
 
 function setPlayerSeatName(player, text) {
 	const nameEl = getSeatRef(player)?.nameEl ?? null;
-	if (!nameEl) {
+	if (!nameEl || nameEl === document.activeElement) {
+		// The player may be renaming this bot right now; keep the edit intact.
 		return;
 	}
 	nameEl.textContent = text;
@@ -1430,9 +1468,7 @@ function renderVersionOverlay() {
 }
 
 function syncOverlayBackdrop() {
-	const isOverlayOpen = Object.values(overlays).some(({ el }) =>
-		el && !el.classList.contains("hidden")
-	);
+	const isOverlayOpen = Object.values(overlays).some(({ el }) => el && !el.classList.contains("hidden"));
 	overlayBackdrop.classList.toggle("hidden", !isOverlayOpen);
 }
 
@@ -1480,8 +1516,13 @@ function closeAllOverlays() {
 function syncLogUi() {
 	const hasLogHistory = !!logList && logList.childElementCount > 0;
 	const showSummaryButtons = !SPEED_MODE && summaryButtonsVisible;
+	// Career stats survive page refreshes, so the button stays available on the
+	// setup screen and between hands; only an active hand hides it.
+	const showProfileButton = !SPEED_MODE && !gameState.handInProgress &&
+		playerProfile?.totals.tournaments > 0;
 
 	statsButton.classList.toggle("hidden", !showSummaryButtons);
+	profileButton.classList.toggle("hidden", !showProfileButton);
 	logButton.classList.toggle("hidden", !showSummaryButtons || !hasLogHistory);
 }
 
@@ -1490,7 +1531,12 @@ function setSummaryButtonsVisible(isVisible) {
 	syncLogUi();
 }
 
-function setStartButtonLabel(text) {
+function renderLangButton() {
+	langButton.textContent = getLang() === "zh" ? "EN" : "中文";
+}
+
+function renderStartButtonLabel() {
+	const text = t(startButtonLabelKey);
 	if (startButtonLabel) {
 		startButtonLabel.textContent = text;
 		startButtonLabel.classList.remove("hidden");
@@ -1499,84 +1545,9 @@ function setStartButtonLabel(text) {
 	startButton.textContent = text;
 }
 
-function showNewRoundCountdown(seconds) {
-	if (!newRoundCountdown || !newRoundCountdownValue) {
-		setStartButtonLabel(`New Round in ${seconds}`);
-		return;
-	}
-	newRoundCountdownValue.textContent = String(seconds);
-	newRoundCountdown.classList.remove("hidden");
-}
-
-function clearNewRoundCountdown({ notify } = { notify: false }) {
-	const wasActive = newRoundCountdownTimer !== null ||
-		newRoundCountdownSeconds > 0;
-	if (newRoundCountdownTimer !== null) {
-		clearTimeout(newRoundCountdownTimer);
-		newRoundCountdownTimer = null;
-	}
-	newRoundCountdownSeconds = 0;
-	if (newRoundControls) {
-		newRoundControls.classList.remove("new-round-countdown-active");
-	}
-	startButton.classList.remove("new-round-countdown-active");
-	if (newRoundCountdown) {
-		newRoundCountdown.classList.add("hidden");
-	}
-	if (newRoundCancelButton) {
-		newRoundCancelButton.classList.add("hidden");
-		newRoundCancelButton.classList.remove("new-round-countdown-active");
-	}
-	if (newRoundCountdownValue) {
-		newRoundCountdownValue.textContent = String(
-			NEW_ROUND_COUNTDOWN_SECONDS,
-		);
-	}
-	if (!newRoundCountdown || !newRoundCountdownValue) {
-		setStartButtonLabel("New Round");
-	}
-	if (notify && wasActive) {
-		enqueueNotification("New round countdown canceled.");
-	}
-}
-
-function tickNewRoundCountdown() {
-	newRoundCountdownSeconds--;
-	if (newRoundCountdownSeconds <= 0) {
-		clearNewRoundCountdown({ notify: false });
-		preFlop();
-		return;
-	}
-	showNewRoundCountdown(newRoundCountdownSeconds);
-	newRoundCountdownTimer = setTimeout(
-		tickNewRoundCountdown,
-		NEW_ROUND_COUNTDOWN_INTERVAL,
-	);
-}
-
-function startNewRoundCountdown() {
-	clearNewRoundCountdown({ notify: false });
-	if (SPEED_MODE || autoplayToGameEnd) {
-		return;
-	}
-	newRoundCountdownSeconds = NEW_ROUND_COUNTDOWN_SECONDS;
-	showNewRoundCountdown(newRoundCountdownSeconds);
-	if (newRoundControls) {
-		newRoundControls.classList.add("new-round-countdown-active");
-	}
-	startButton.classList.add("new-round-countdown-active");
-	if (newRoundCancelButton) {
-		newRoundCancelButton.classList.remove("hidden");
-		newRoundCancelButton.classList.add("new-round-countdown-active");
-	}
-	newRoundCountdownTimer = setTimeout(
-		tickNewRoundCountdown,
-		NEW_ROUND_COUNTDOWN_INTERVAL,
-	);
-}
-
-function cancelNewRoundCountdown() {
-	clearNewRoundCountdown({ notify: true });
+function setStartButtonLabel(key) {
+	startButtonLabelKey = key;
+	renderStartButtonLabel();
 }
 
 /* --------------------------------------------------------------------------------------------------
@@ -1614,17 +1585,17 @@ function getActionLabelDuration() {
 function getPlayerActionNotificationText(playerName, actionName, amount = 0) {
 	switch (actionName) {
 		case "fold":
-			return `${playerName} folded.`;
+			return tf("notify.actionFold", { name: playerName });
 		case "check":
-			return `${playerName} checked.`;
+			return tf("notify.actionCheck", { name: playerName });
 		case "call":
-			return `${playerName} called ${amount}.`;
+			return tf("notify.actionCall", { name: playerName, amount });
 		case "raise":
-			return `${playerName} raised to ${amount}.`;
+			return tf("notify.actionRaise", { name: playerName, amount });
 		case "allin":
-			return `${playerName} is all-in.`;
+			return tf("notify.actionAllin", { name: playerName });
 		default:
-			return `${playerName} did something…`;
+			return tf("notify.actionOther", { name: playerName });
 	}
 }
 
@@ -1821,10 +1792,8 @@ function getHandsPlayedBucket(handCount) {
 }
 
 function getExitCounts() {
-	const humansWithChipsAtExit =
-		gameState.players.filter((p) => !p.isBot && p.chips > 0).length;
-	const botsWithChipsAtExit =
-		gameState.players.filter((p) => p.isBot && p.chips > 0).length;
+	const humansWithChipsAtExit = gameState.players.filter((p) => !p.isBot && p.chips > 0).length;
+	const botsWithChipsAtExit = gameState.players.filter((p) => p.isBot && p.chips > 0).length;
 	return { humansWithChipsAtExit, botsWithChipsAtExit };
 }
 
@@ -1840,9 +1809,7 @@ function trackUnfinishedExit() {
 		return;
 	}
 	const { humansWithChipsAtExit, botsWithChipsAtExit } = getExitCounts();
-	const exitCategory = humansWithChipsAtExit === 0
-		? "last_human_bust"
-		: "humans_left_with_chips";
+	const exitCategory = humansWithChipsAtExit === 0 ? "last_human_bust" : "humans_left_with_chips";
 	exitEventSent = true;
 	globalThis.umami?.track("Poker", {
 		finished: false,
@@ -1900,9 +1867,7 @@ function initStateSyncForGame() {
 }
 
 function createTurnToken() {
-	return `${Date.now().toString(36)}${
-		Math.random().toString(36).slice(2, 8)
-	}`;
+	return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function setPendingAction(player) {
@@ -1948,9 +1913,9 @@ async function fetchPendingRemoteAction(turnToken) {
 	}
 
 	try {
-		const url = `${ACTION_SYNC_ENDPOINT}?tableId=${
-			encodeURIComponent(tableId)
-		}&turnToken=${encodeURIComponent(turnToken)}`;
+		const url = `${ACTION_SYNC_ENDPOINT}?tableId=${encodeURIComponent(tableId)}&turnToken=${
+			encodeURIComponent(turnToken)
+		}`;
 		const res = await fetch(url, {
 			cache: "no-store",
 		});
@@ -2015,17 +1980,12 @@ const humanTurnController = createHumanTurnController({
 	actionButton,
 	amountControls,
 	amountSlider,
-	sliderOutput,
+	amountInput,
 	decrementButton: amountDecrementButton,
 	incrementButton: amountIncrementButton,
 	actionPollInterval: ACTION_POLL_INTERVAL,
 	actionStep: CHIP_UNIT,
 	onControlsHidden: updateFastForwardButton,
-	onNewTurn: () => {
-		if (!hasStateSyncEnabled()) {
-			playTurnChime();
-		}
-	},
 	setActiveTurnPlayer,
 	setPendingAction,
 	clearPendingAction,
@@ -2063,6 +2023,25 @@ function formatCardLabel(cardCode) {
 	const rank = cardCode[0] === "T" ? "10" : cardCode[0];
 	const suit = CARD_SUIT_SYMBOLS[cardCode[1]] || cardCode[1];
 	return `${rank}${suit}`;
+}
+
+// pokersolver hand names -> i18n keys for winner notifications
+const HAND_NAME_I18N_KEY = {
+	"Royal Flush": "handName.Royal Flush",
+	"Straight Flush": "handName.Straight Flush",
+	"Four of a Kind": "handName.Four of a Kind",
+	"Full House": "handName.Full House",
+	"Flush": "handName.Flush",
+	"Straight": "handName.Straight",
+	"Three of a Kind": "handName.Three of a Kind",
+	"Two Pair": "handName.Two Pair",
+	"Pair": "handName.Pair",
+	"High Card": "handName.High Card",
+};
+
+function translateHandName(handName) {
+	const key = HAND_NAME_I18N_KEY[handName];
+	return key ? t(key) : handName;
 }
 
 function applyBotReveal(player, revealDecision) {
@@ -2195,16 +2174,12 @@ function triggerMainPotWinnerReactions(context) {
 
 function updateHandStrengthDisplays() {
 	const communityCards = getCommunityCardCodes();
-	gameState.players.forEach((player) =>
-		renderPlayerSeat(player, communityCards)
-	);
+	gameState.players.forEach((player) => renderPlayerSeat(player, communityCards));
 }
 
 function updateWinProbabilityDisplays() {
 	const communityCards = getCommunityCardCodes();
-	gameState.players.forEach((player) =>
-		renderPlayerSeat(player, communityCards)
-	);
+	gameState.players.forEach((player) => renderPlayerSeat(player, communityCards));
 }
 
 function computeSpectatorWinProbabilities(reason = "") {
@@ -2316,15 +2291,28 @@ function startGame() {
 		gameState.bigBlind = INITIAL_BIG_BLIND;
 		gameState.lastRaise = INITIAL_BIG_BLIND;
 		gameState.handInProgress = false;
+		// Remember the seat layout for one-click replay. An empty name marks a
+		// bot seat at this point; createPlayers() assigns bot names afterwards.
+		lastGameSeatConfig = seatRefs
+			.filter((seatRef) => !seatRef.seatEl.classList.contains("hidden"))
+			.map((seatRef) => ({
+				seatSlot: seatRef.seatSlot,
+				name: seatRef.nameEl.textContent.trim(),
+				isBot: seatRef.seatEl.classList.contains("bot") ||
+					seatRef.nameEl.textContent.trim() === "",
+			}));
 		createPlayers();
 		hadHumansAtStart = gameState.players.some((p) => !p.isBot);
 		currentGameSaveEligible = hasExactlyOneHumanPlayer(gameState.players);
+		// One stable id per tournament lets the career profile dedupe saves across restores.
+		currentTournamentId = currentGameSaveEligible && !SPEED_MODE ? crypto.randomUUID() : null;
+		currentTournamentResultSaved = false;
 		exitEventSent = false;
 
 		if (gameState.players.length > 1) {
 			seatRefs.forEach((seatRef) =>
 				renderSeatSetupState(seatRef, {
-					nameEditable: false,
+					nameEditable: seatRef.seatEl.classList.contains("bot"),
 					controlsVisible: false,
 				})
 			);
@@ -2332,20 +2320,46 @@ function startGame() {
 			instructionsButton.classList.add("hidden");
 			closeAllOverlays();
 			gameState.gameStarted = true;
+			syncCheatAndReplayButtons();
 			initStateSyncForGame();
 
 			preFlop();
 		} else {
 			hadHumansAtStart = false;
 			currentGameSaveEligible = false;
-			seatRefs.forEach((seatRef) => {
-				if (seatRef.nameEl.textContent === "") {
-					renderSeatSetupState(seatRef, { visible: true });
-				}
-			});
+			// Not enough players: restore a usable setup screen. The old code left the
+			// table on a dead $0 view with Start hidden and gameStarted=false, so every
+			// later Replay click early-returned until the page was refreshed.
 			gameState.players = [];
 			gameState.allPlayers = [];
-			enqueueNotification("Not enough players");
+			gameState.pot = 0;
+			gameState.communityCards = [];
+			gameState.gameStarted = false;
+			humanTurnController.hide();
+			clearActiveTurnPlayer(false);
+			clearPendingAction();
+			notifArr.length = 0;
+			renderNotificationBar(notification, notifArr);
+			renderPot();
+			setCommunityCards([]);
+			seatRefs.forEach((seatRef) => {
+				const preservedName = seatRef.nameEl.textContent.trim();
+				clearRenderedSeat(seatRef);
+				renderSeatSetupState(seatRef, {
+					visible: true,
+					isBot: preservedName === "",
+					nameEditable: true,
+					controlsVisible: true,
+				});
+				seatRef.nameEl.textContent = preservedName;
+				seatRef.totalEl.textContent = "2000";
+				seatRef.betEl.textContent = "0";
+			});
+			setStartButtonLabel("button.start");
+			startButton.classList.remove("hidden");
+			instructionsButton.classList.remove("hidden");
+			syncCheatAndReplayButtons();
+			enqueueNotification(t("notify.notEnoughPlayers"));
 		}
 	} else {
 		// New Round
@@ -2364,17 +2378,21 @@ function createPlayers() {
 		if (seatRef.seatEl.classList.contains("hidden")) {
 			continue;
 		}
-		if (seatRef.nameEl.textContent.trim() === "") {
-			seatRef.nameEl.textContent = `Bot ${botIndex++}`;
+		// Bot identity comes from the seat's "bot" class (set during setup or replay);
+		// an empty name means "assign the next default bot name", a custom name is kept.
+		const isBotSeat = seatRef.seatEl.classList.contains("bot") ||
+			seatRef.nameEl.textContent.trim() === "";
+		if (isBotSeat) {
+			if (seatRef.nameEl.textContent.trim() === "") {
+				seatRef.nameEl.textContent = `Bot ${botIndex++}`;
+			}
 			renderSeatSetupState(seatRef, { isBot: true });
 		} else {
 			renderSeatSetupState(seatRef, { isBot: false });
 		}
 	}
 
-	const activeSeatRefs = seatRefs.filter((seatRef) =>
-		!seatRef.seatEl.classList.contains("hidden")
-	);
+	const activeSeatRefs = seatRefs.filter((seatRef) => !seatRef.seatEl.classList.contains("hidden"));
 	for (const seatRef of activeSeatRefs) {
 		const seatIndex = gameState.players.length;
 		const playerState = {
@@ -2437,6 +2455,361 @@ function createPlayers() {
 	gameState.allPlayers = gameState.players.slice();
 }
 
+function syncCheatAndReplayButtons() {
+	const showButtons = gameState.gameStarted === true;
+	replayButton.classList.toggle("hidden", !showButtons);
+}
+
+// One-click replay: reset the running tournament and immediately deal a new one
+// with the same seat configuration (seat count, names, bot seats).
+// Seat layout for a replay: live players are the source of truth, because a restored
+// or partially captured lastGameSeatConfig may be missing bot seats. Hiding those
+// seats would leave createPlayers() with one player and strand the table on $0.
+function getReplaySeatConfigMap() {
+	const configs = new Map();
+	gameState.allPlayers.forEach((player) => {
+		if (!Number.isInteger(player.seatSlot)) {
+			return;
+		}
+		configs.set(player.seatSlot, {
+			seatSlot: player.seatSlot,
+			name: player.name,
+			isBot: player.isBot === true,
+		});
+	});
+	lastGameSeatConfig.forEach((entry) => {
+		if (
+			!Number.isInteger(entry.seatSlot) || configs.has(entry.seatSlot)
+		) {
+			return;
+		}
+		configs.set(entry.seatSlot, entry);
+	});
+	return configs;
+}
+
+function restartTournament() {
+	if (!gameState.gameStarted) {
+		return;
+	}
+	const replayConfigs = getReplaySeatConfigMap();
+	// Bot seats keep their (possibly renamed) names; createPlayers() fills only
+	// bot seats whose name is empty with a fresh default bot name.
+	seatRefs.forEach((seatRef) => {
+		clearRenderedSeat(seatRef);
+		seatRef.playerSeatIndex = null;
+		seatRef.clearActionLabelState = null;
+		seatRef.clearWinnerReactionState = null;
+		const config = replayConfigs.get(seatRef.seatSlot);
+		renderSeatSetupState(
+			seatRef,
+			config
+				? { visible: true, isBot: config.isBot, nameEditable: config.isBot === true, controlsVisible: false }
+				: { visible: false, isBot: false, nameEditable: false, controlsVisible: false },
+		);
+		if (config && (config.name || !config.isBot)) {
+			seatRef.nameEl.textContent = config.name;
+		}
+	});
+	lastGameSeatConfig = [...replayConfigs.values()].sort((a, b) => a.seatSlot - b.seatSlot);
+	resetRuntimeBeforeRestore();
+	clearBotActionQueue();
+	activeBotTurn = null;
+	clearPendingAction();
+	setSummaryButtonsVisible(false);
+	removeSavedGameSnapshot();
+	closeAllOverlays();
+	gameState.gameStarted = false;
+	gameState.handInProgress = false;
+	// Gate the new game behind the start button instead of dealing immediately.
+	syncCheatAndReplayButtons();
+	setCommunityCards([]);
+	renderPot();
+	setStartButtonLabel("button.start");
+	startButton.classList.remove("hidden");
+	enqueueNotification(tf("notify.replayReady"));
+}
+
+// Bot names can be edited mid-game on the seat badge. This syncs every place that
+// still shows the old name: log history, notification bar, stats table, cheat panel,
+// remote clients, and the saved-game snapshot.
+function applyPlayerRename(oldName, nextName) {
+	// Only messages that lead with the name are rewritten, so "Bot 1" never
+	// corrupts "Bot 10" in historical log entries.
+	const rewriteMessage = (message) =>
+		message.startsWith(`${oldName} `) ? `${nextName}${message.slice(oldName.length)}` : message;
+	notifArr.forEach((message, index) => {
+		notifArr[index] = rewriteMessage(message);
+	});
+	for (let i = 0; i < pendingNotif.length; i++) {
+		pendingNotif[i] = rewriteMessage(pendingNotif[i]);
+	}
+	if (logList) {
+		Array.from(logList.children).forEach((entry) => {
+			entry.textContent = rewriteMessage(entry.textContent || "");
+		});
+	}
+	renderNotificationBar(notification, notifArr);
+}
+
+function applySeatRename(seatRef) {
+	const rawName = seatRef.nameEl.textContent.replace(/\s+/g, " ").trim();
+	const player = gameState.allPlayers.find(
+		(currentPlayer) => currentPlayer.seatSlot === seatRef.seatSlot,
+	);
+	// Only live bot seats sync here; setup-phase edits go through the normal start flow.
+	if (!player || player.isBot !== true) {
+		return;
+	}
+	// Clearing the badge mid-game keeps the current name instead of unnaming the seat.
+	const nextName = rawName === "" ? player.name : rawName;
+	if (nextName === player.name) {
+		seatRef.nameEl.textContent = nextName;
+		return;
+	}
+	const oldName = player.name;
+	player.name = nextName;
+	seatRef.nameEl.textContent = nextName;
+	// Drop a pending action-label timer before it can restore the old name.
+	clearSeatActionLabel(seatRef, nextName);
+	applyPlayerRename(oldName, nextName);
+	renderStatsOverlay();
+	refreshCheatPanel();
+	queueStateSync();
+	saveCurrentGameSnapshot();
+}
+
+// Clicking a bot badge may catch it mid action label ("跟注", "思考中…"); put the
+// real name back so the edit starts from the actual name.
+function prepareSeatRename(seatRef) {
+	const player = gameState.allPlayers.find(
+		(currentPlayer) => currentPlayer.seatSlot === seatRef.seatSlot,
+	);
+	if (!player || player.isBot !== true) {
+		return;
+	}
+	seatRef.nameEl.textContent = player.name;
+}
+
+function getCheatTableState() {
+	return {
+		gameStarted: gameState.gameStarted,
+		handInProgress: gameState.handInProgress,
+		deckCount: gameState.deck.length,
+		communityCards: gameState.communityCards.slice(),
+		graveyardCards: gameState.cardGraveyard.slice(),
+		players: gameState.allPlayers.map((player) => ({
+			seatIndex: player.seatIndex,
+			name: player.name,
+			isBot: player.isBot,
+			chips: player.chips,
+			folded: player.folded,
+			allIn: player.allIn,
+			busted: !gameState.players.includes(player),
+			holeCards: player.holeCards.slice(),
+		})),
+	};
+}
+
+// Cheat helper: swap one of a seated player's hole cards by trading with the deck.
+// The replaced card goes to the graveyard so the next shuffle stays a fair 52-card deck.
+function applyCheatCardSwap(seatIndex, oldCardCode, newCardCode) {
+	if (!gameState.handInProgress) {
+		return { ok: false, message: t("cheat.handNotInProgress") };
+	}
+	const player = gameState.allPlayers.find((entry) => entry.seatIndex === seatIndex);
+	if (!player) {
+		return { ok: false, message: t("cheat.noSeat") };
+	}
+	if (!player.holeCards.every(Boolean)) {
+		return { ok: false, message: t("cheat.noHoleCards") };
+	}
+	if (player.folded) {
+		return { ok: false, message: t("cheat.alreadyFolded") };
+	}
+	const cardIndex = player.holeCards.indexOf(oldCardCode);
+	if (cardIndex === -1) {
+		return { ok: false, message: tf("cheat.notInHand", { code: oldCardCode }) };
+	}
+	const knownCards = new Set(INITIAL_DECK);
+	if (!knownCards.has(newCardCode)) {
+		return { ok: false, message: tf("cheat.unknownCard", { code: newCardCode }) };
+	}
+	if (newCardCode === oldCardCode) {
+		return { ok: false, message: tf("cheat.notInDeck", { code: newCardCode }) };
+	}
+	if (player.holeCards.includes(newCardCode)) {
+		return { ok: false, message: tf("cheat.onTable", { code: newCardCode }) };
+	}
+	const cardsInPlay = new Set();
+	gameState.allPlayers.forEach((entry) => {
+		if (entry !== player) {
+			entry.holeCards.forEach((code) => code && cardsInPlay.add(code));
+		}
+	});
+	gameState.communityCards.forEach((code) => cardsInPlay.add(code));
+	if (cardsInPlay.has(newCardCode)) {
+		return { ok: false, message: tf("cheat.onTable", { code: newCardCode }) };
+	}
+	if (!gameState.deck.includes(newCardCode)) {
+		return { ok: false, message: tf("cheat.notInDeck", { code: newCardCode }) };
+	}
+	gameState.deck.splice(gameState.deck.indexOf(newCardCode), 1);
+	gameState.cardGraveyard.push(oldCardCode);
+	player.holeCards[cardIndex] = newCardCode;
+	renderPlayerSeat(player);
+	updateHandStrengthDisplays();
+	queueStateSync();
+	return { ok: true, message: tf("cheat.swapped", { old: oldCardCode, new: newCardCode }) };
+}
+// Flashlight peek on the shared table: one face layer per hidden card, lit by a
+// feathered spotlight that follows the pointer. The 800ms sync reuses existing
+// layers and only recalibrates geometry; the mask stays mounted so hovering
+// never rebuilds (or flashes) anything.
+function setCheatCardReveal(cardEl, cardCode) {
+	const holeCardsEl = cardEl.parentElement;
+	const currentTorch = cardEl._cheatTorch;
+	if (cardEl.dataset.cheatCode !== cardCode || currentTorch?.parentElement !== holeCardsEl) {
+		clearCheatCardReveal(cardEl);
+		cardEl.dataset.cheatCode = cardCode;
+		const torch = document.createElement("div");
+		torch.className = "cheat-card-torch";
+		torch.style.backgroundImage = `url("cards/${cardCode}.svg")`;
+		torch._cheatCardEl = cardEl;
+		cardEl._cheatTorch = torch;
+		holeCardsEl.appendChild(torch);
+		syncCheatCardTorchGeometry(cardEl);
+	}
+	bindCheatHandHover(holeCardsEl);
+}
+
+function clearCheatCardReveal(cardEl) {
+	const torch = cardEl._cheatTorch;
+	if (!cardEl.dataset.cheatCode && !torch) {
+		return;
+	}
+	delete cardEl.dataset.cheatCode;
+	delete cardEl._cheatInv;
+	if (!torch) {
+		return;
+	}
+	const holeCardsEl = torch.parentElement;
+	torch.remove();
+	delete cardEl._cheatTorch;
+	if (holeCardsEl && !holeCardsEl.querySelector(".cheat-card-torch")) {
+		holeCardsEl.classList.remove("cheat-hand-hovering");
+	}
+}
+
+// The overlay is positioned over its card and re-measured on each cheat poll tick.
+function syncCheatCardTorchGeometry(cardEl) {
+	const torch = cardEl._cheatTorch;
+	if (!torch) {
+		return;
+	}
+	torch.style.left = `${cardEl.offsetLeft}px`;
+	torch.style.top = `${cardEl.offsetTop}px`;
+	torch.style.width = `${cardEl.offsetWidth}px`;
+	torch.style.height = `${cardEl.offsetHeight}px`;
+	const cardTransform = getComputedStyle(cardEl).transform;
+	torch.style.transform = cardTransform === "none" ? "" : cardTransform;
+	// Hole cards are tilted a few degrees; invert that so the light spot stays
+	// glued to the pointer instead of drifting toward the card edges.
+	try {
+		cardEl._cheatInv = cardTransform === "none" ? null : new DOMMatrix(cardTransform).inverse();
+	} catch {
+		cardEl._cheatInv = null;
+	}
+}
+
+// Move the mask hole only: two custom properties per torch, no layout work.
+function updateCheatTorchLight(holeCardsEl, clientX, clientY) {
+	const containerRect = holeCardsEl.getBoundingClientRect();
+	const pointerX = clientX - containerRect.left;
+	const pointerY = clientY - containerRect.top;
+	holeCardsEl.querySelectorAll(".cheat-card-torch").forEach((torch) => {
+		const cardEl = torch._cheatCardEl;
+		if (!cardEl) {
+			return;
+		}
+		const width = cardEl.offsetWidth;
+		const height = cardEl.offsetHeight;
+		let offsetX = pointerX - cardEl.offsetLeft - width / 2;
+		let offsetY = pointerY - cardEl.offsetTop - height / 2;
+		const inverse = cardEl._cheatInv;
+		if (inverse) {
+			const rotatedX = inverse.a * offsetX + inverse.c * offsetY + inverse.e;
+			const rotatedY = inverse.b * offsetX + inverse.d * offsetY + inverse.f;
+			offsetX = rotatedX;
+			offsetY = rotatedY;
+		}
+		torch.style.setProperty("--mx", `${(offsetX + width / 2).toFixed(1)}px`);
+		torch.style.setProperty("--my", `${(offsetY + height / 2).toFixed(1)}px`);
+	});
+}
+
+function bindCheatHandHover(holeCardsEl) {
+	if (holeCardsEl._cheatHoverBound) {
+		return;
+	}
+	holeCardsEl._cheatHoverBound = true;
+	holeCardsEl.addEventListener("mouseenter", handleCheatHandEnter);
+	holeCardsEl.addEventListener("mousemove", handleCheatHandMove);
+	holeCardsEl.addEventListener("mouseleave", handleCheatHandLeave);
+}
+
+function handleCheatHandEnter(ev) {
+	handleCheatHandMove.call(this, ev);
+}
+
+function handleCheatHandMove(ev) {
+	const holeCardsEl = this;
+	if (holeCardsEl._cheatHideTimer) {
+		clearTimeout(holeCardsEl._cheatHideTimer);
+		holeCardsEl._cheatHideTimer = null;
+	}
+	holeCardsEl.classList.add("cheat-hand-hovering");
+	updateCheatTorchLight(holeCardsEl, ev.clientX, ev.clientY);
+}
+
+function handleCheatHandLeave() {
+	const holeCardsEl = this;
+	if (holeCardsEl._cheatHideTimer) {
+		clearTimeout(holeCardsEl._cheatHideTimer);
+	}
+	holeCardsEl._cheatHideTimer = setTimeout(() => {
+		// Seat highlight animations can shift the hand under a stationary pointer.
+		if (holeCardsEl.matches(":hover")) {
+			holeCardsEl._cheatHideTimer = null;
+			return;
+		}
+		holeCardsEl.classList.remove("cheat-hand-hovering");
+		holeCardsEl._cheatHideTimer = null;
+	}, 140);
+}
+
+// Runs on every cheat poll tick and on toggle change; idempotent per card element.
+function syncCheatTableCardHover(enabled) {
+	gameState.allPlayers.forEach((player) => {
+		const seatRef = getSeatRef(player);
+		if (!seatRef) {
+			return;
+		}
+		player.holeCards.forEach((cardCode, cardIndex) => {
+			const cardEl = seatRef.cardEls[cardIndex];
+			if (!cardEl) {
+				return;
+			}
+			const isHiddenRealCard = Boolean(cardCode) && player.visibleHoleCards[cardIndex] !== true;
+			if (enabled && isHiddenRealCard) {
+				setCheatCardReveal(cardEl, cardCode);
+				syncCheatCardTorchGeometry(cardEl);
+			} else {
+				clearCheatCardReveal(cardEl);
+			}
+		});
+	});
+}
 function setDealer() {
 	const dealerPlan = advanceDealer(gameState.players);
 	if (!dealerPlan) {
@@ -2449,7 +2822,7 @@ function setDealer() {
 	}
 	renderPlayerSeat(dealerPlan.dealer);
 
-	enqueueNotification(`${gameState.players[0].name} is Dealer.`);
+	enqueueNotification(tf("notify.isDealer", { name: gameState.players[0].name }));
 }
 
 function updateBlindLevelForCurrentHand() {
@@ -2461,7 +2834,10 @@ function updateBlindLevelForCurrentHand() {
 	applyGameStatePatch(blindLevelUpdate.gameStatePatch);
 	if (blindLevelUpdate.blindsChanged) {
 		enqueueNotification(
-			`Blinds are now ${gameState.smallBlind}/${gameState.bigBlind}.`,
+			tf("notify.blindsAreNow", {
+				sb: gameState.smallBlind,
+				bb: gameState.bigBlind,
+			}),
 		);
 	}
 }
@@ -2478,10 +2854,16 @@ function setBlinds() {
 	renderPot();
 
 	enqueueNotification(
-		`${blindPlan.smallBlindPlayer.name} posted small blind of ${blindPlan.smallBlindAmount}.`,
+		tf("notify.postSmallBlind", {
+			name: blindPlan.smallBlindPlayer.name,
+			amount: blindPlan.smallBlindAmount,
+		}),
 	);
 	enqueueNotification(
-		`${blindPlan.bigBlindPlayer.name} posted big blind of ${blindPlan.bigBlindAmount}.`,
+		tf("notify.postBigBlind", {
+			name: blindPlan.bigBlindPlayer.name,
+			amount: blindPlan.bigBlindAmount,
+		}),
 	);
 }
 
@@ -2507,8 +2889,8 @@ function dealCards() {
 // Execute the standard pre-flop steps: rotate dealer, post blinds, deal cards, start betting.
 function preFlop() {
 	// --- Hand Start And Reset ---------------------------------------------------
+	clearRunoutWatchdog();
 	setCurrentFlowState({ type: "hand-start" });
-	clearNewRoundCountdown({ notify: false });
 	// Analytics: count hands and mark start time
 	totalHands++;
 	if (runoutPhaseTimer) {
@@ -2538,7 +2920,7 @@ function preFlop() {
 
 	nextHandPlan.bustedPlayers.forEach((player) => {
 		renderSeatSetupState(getSeatRef(player), { visible: false });
-		enqueueNotification(`${player.name} is out of the game!`);
+		enqueueNotification(tf("notify.outOfGame", { name: player.name }));
 		logFlow("player_bust", { name: player.name });
 		logSpeedmodeEvent("player_bust", {
 			handId: gameState.handId,
@@ -2555,7 +2937,7 @@ function preFlop() {
 	if (nextHandPlan.type === "game-over") {
 		const champion = nextHandPlan.champion;
 		clearActiveTurnPlayer(false);
-		enqueueNotification(`${champion.name} wins the game! 🏆`);
+		enqueueNotification(tf("notify.champion", { name: champion.name }));
 		// Reveal champion's stack
 		renderPlayerTotal(champion);
 		renderPlayerSeat(champion);
@@ -2605,9 +2987,7 @@ function preFlop() {
 		blindLevel: gameState.blindLevel,
 		smallBlind: gameState.smallBlind,
 		bigBlind: gameState.bigBlind,
-		dealerSeatIndex: gameState.players.find((player) =>
-			player.dealer
-		)?.seatIndex ?? null,
+		dealerSeatIndex: gameState.players.find((player) => player.dealer)?.seatIndex ?? null,
 		communityCards: [],
 		players: handStartPlayers,
 	});
@@ -2629,6 +3009,7 @@ function dealCommunityCards(amount) {
 		return;
 	}
 	applyGameStatePatch(dealPlan.gameStatePatch);
+	applyPlayerPatches(dealPlan.playerPatches ?? []);
 	renderTableCommunityCards(communityCardSlots, gameState.communityCards);
 	updateHandStrengthDisplays();
 	if (
@@ -2640,6 +3021,7 @@ function dealCommunityCards(amount) {
 }
 
 function setPhase() {
+	const watchdogAtStart = runoutWatchdog;
 	logFlow("setPhase", {
 		phase: getCurrentPhase(gameState.currentPhaseIndex),
 	});
@@ -2649,6 +3031,11 @@ function setPhase() {
 		clearBotPassiveValueCheckIntents(phasePlan.botIntentResetReason);
 	}
 	if (phasePlan.reason === "onlyActivePlayer") {
+		// startBettingRound()/queueRunoutPhaseAdvance() may have registered the next
+		// street's marker while this phase was resolving; only clear our own.
+		if (runoutWatchdog === watchdogAtStart) {
+			clearRunoutWatchdog();
+		}
 		return doShowdown();
 	}
 
@@ -2658,22 +3045,25 @@ function setPhase() {
 	switch (phasePlan.phase) {
 		case "flop":
 			dealCommunityCards(phasePlan.cardsToDeal);
-			enqueueNotification("Flop (3 cards) dealt.");
+			enqueueNotification(t("notify.flop"));
 			startBettingRound();
 			break;
 		case "turn":
 			dealCommunityCards(phasePlan.cardsToDeal);
-			enqueueNotification("Turn (4th card) dealt.");
+			enqueueNotification(t("notify.turn"));
 			startBettingRound();
 			break;
 		case "river":
 			dealCommunityCards(phasePlan.cardsToDeal);
-			enqueueNotification("River (5th card) dealt.");
+			enqueueNotification(t("notify.river"));
 			startBettingRound();
 			break;
 		case "showdown":
 			doShowdown();
 			break;
+	}
+	if (runoutWatchdog === watchdogAtStart) {
+		clearRunoutWatchdog();
 	}
 	queueStateSync();
 }
@@ -2685,6 +3075,10 @@ function queueRunoutPhaseAdvance(reason = "") {
 		reason,
 		phaseIndex: gameState.currentPhaseIndex,
 	});
+	if (runoutPhaseTimer) {
+		return;
+	}
+	markRunoutStart();
 	const runoutPhaseDelay = getRunoutPhaseDelay();
 	if (
 		!isAllInRunout(gameState.players, gameState.currentBet) ||
@@ -2692,9 +3086,6 @@ function queueRunoutPhaseAdvance(reason = "") {
 	) {
 		saveCurrentGameSnapshot();
 		return setPhase();
-	}
-	if (runoutPhaseTimer) {
-		return;
 	}
 	logFlow("delay runout phase", {
 		reason,
@@ -2851,37 +3242,260 @@ function applyTurnAction(player, actionRequest) {
 	return resolvedAction;
 }
 
+function getBotTurnSignature(player) {
+	return [
+		player.chips,
+		player.roundBet,
+		player.folded === true,
+		player.allIn === true,
+		player.actionState?.name ?? "",
+		gameState.pot,
+		gameState.currentBet,
+		gameState.raisesThisRound,
+		gameState.currentPhaseIndex,
+	].join("|");
+}
+
+function reportBotError(context, error, player = null) {
+	const entry = {
+		context,
+		message: error?.message ?? String(error),
+		stack: error?.stack ?? "",
+		at: new Date().toISOString(),
+		handId: gameState.handId,
+		phase: gameState.currentPhaseIndex,
+		activeSeatIndex: gameState.activeSeatIndex,
+		player: player?.name ?? null,
+		playerSeatIndex: player?.seatIndex ?? null,
+		pot: gameState.pot,
+		currentBet: gameState.currentBet,
+	};
+	botDiagnostics.push(entry);
+	if (botDiagnostics.length > BOT_ERROR_LOG_LIMIT) {
+		botDiagnostics.shift();
+	}
+	console.error("[poker] bot turn error", entry, error);
+}
+
+// The action patch is applied before rendering/notification side effects, so a changed
+// signature means the bet already landed and only the remainder of the flow is missing.
+function recoverActiveBotTurn(turn, error) {
+	if (!turn) {
+		return false;
+	}
+	turn.recoveryAttempts = (turn.recoveryAttempts ?? 0) + 1;
+	if (turn.recoveryAttempts > 2) {
+		reportBotError("bot-turn-give-up", error, turn.player);
+		return false;
+	}
+	const player = turn.player;
+	// If the flow already moved to another seat, nextPlayer() completed before the
+	// error surfaced; replaying the continuation would skip a player.
+	if (gameState.activeSeatIndex !== player.seatIndex) {
+		logFlow("bot recovery skipped: turn already advanced", {
+			name: player.name,
+		});
+		return true;
+	}
+	const acted = getBotTurnSignature(player) !== turn.signature;
+	try {
+		if (!acted) {
+			const actionState = getPlayerActionState(gameState, player);
+			const fallback = actionState.canCheck ? { action: "check" } : { action: "fold" };
+			const resolvedAction = applyTurnAction(player, fallback);
+			if (!resolvedAction) {
+				reportBotError("bot-turn-fallback-rejected", error, player);
+				return false;
+			}
+			logFlow("bot turn fallback applied", {
+				name: player.name,
+				action: fallback.action,
+			});
+		} else {
+			logFlow("bot turn resumed after error", { name: player.name });
+		}
+		continueAfterResolvedTurn({
+			player,
+			cycles: turn.cycles,
+			nextPlayer: turn.nextPlayer,
+			logPrefix: "bot",
+			advanceReason: "bot",
+		});
+		return true;
+	} catch (recoveryError) {
+		reportBotError("bot-turn-recovery-failed", recoveryError, player);
+		// Last resort: clear the highlight so the next phase can still schedule players.
+		try {
+			clearActiveTurnPlayer(false);
+			queueRunoutPhaseAdvance("bot-recovery-failed");
+		} catch (finalError) {
+			reportBotError("bot-turn-final-recovery-failed", finalError, player);
+		}
+		return false;
+	}
+}
+
+// A turn with no queued action and no state change for BOT_TURN_WATCHDOG_MS was lost
+// (dropped timer, exception before enqueue, stale queue). Recover it instead of freezing.
+function checkBotTurnWatchdog() {
+	const turn = activeBotTurn;
+	if (!turn || !gameState.gameStarted || gameState.gameFinished) {
+		return;
+	}
+	// Background tabs throttle both the bot timer and this interval; don't misread
+	// that throttling as a lost action.
+	if (document.visibilityState !== "visible") {
+		return;
+	}
+	if (Date.now() - turn.startedAt < BOT_TURN_WATCHDOG_MS) {
+		return;
+	}
+	if (isBotActionPending()) {
+		return;
+	}
+	if (gameState.activeSeatIndex !== turn.player.seatIndex) {
+		activeBotTurn = null;
+		return;
+	}
+	const acted = getBotTurnSignature(turn.player) !== turn.signature;
+	// Drop the orphaned queue entry: its timer is gone, so leaving it would make the
+	// next scheduled turn execute a stale closure against the repaired state.
+	clearBotActionQueue();
+	reportBotError(
+		acted ? "bot-turn-watchdog-after-action" : "bot-turn-watchdog-lost",
+		new Error("bot turn watchdog fired"),
+		turn.player,
+	);
+	const recovered = recoverActiveBotTurn(
+		turn,
+		new Error("bot turn watchdog"),
+	);
+	if (activeBotTurn === turn) {
+		if (recovered) {
+			activeBotTurn = null;
+		} else if (turn.recoveryAttempts > 2) {
+			// Give up quietly after the capped attempts; keep the diagnostics entry.
+			activeBotTurn = null;
+		} else {
+			// Keep the turn alive for one more watchdog pass, but don't spin hot.
+			turn.startedAt = Date.now();
+		}
+	}
+}
+
+// The street did not advance (lost runout delay timer or setPhase threw before
+// dealing). Re-issue setPhase; the phase/board snapshot prevents double-dealing.
+function checkRunoutWatchdog() {
+	const pending = runoutWatchdog;
+	if (
+		!pending || !gameState.gameStarted || !gameState.handInProgress ||
+		gameState.gameFinished
+	) {
+		return;
+	}
+	if (document.visibilityState !== "visible") {
+		return;
+	}
+	if (Date.now() - pending.at < 6000) {
+		return;
+	}
+	if (
+		gameState.currentPhaseIndex !== pending.phaseIndex ||
+		gameState.communityCards.length !== pending.boardCount
+	) {
+		// setPhase already moved the hand along; do not deal a second card.
+		clearRunoutWatchdog();
+		return;
+	}
+	if (gameState.activeSeatIndex !== null || isBotActionPending()) {
+		return;
+	}
+	const actionButtonEl = document.querySelector("#action-button");
+	if (
+		actionButtonEl && !actionButtonEl.classList.contains("hidden") &&
+		actionButtonEl.offsetParent
+	) {
+		return;
+	}
+	pending.attempts = (pending.attempts ?? 0) + 1;
+	if (pending.attempts > 2) {
+		clearRunoutWatchdog();
+		reportBotError(
+			"runout-give-up",
+			new Error("runout phase did not advance"),
+			null,
+		);
+		return;
+	}
+	pending.at = Date.now();
+	reportBotError(
+		"runout-watchdog",
+		new Error("runout phase did not advance"),
+		null,
+	);
+	if (runoutPhaseTimer) {
+		clearTimeout(runoutPhaseTimer);
+		runoutPhaseTimer = null;
+	}
+	try {
+		setPhase();
+	} catch (error) {
+		reportBotError("runout-recovery-failed", error, null);
+	}
+}
+
 function runBotTurn({ player, cycles, nextPlayer }) {
 	setActiveTurnPlayer(player);
 	humanTurnController.hide();
 	clearPlayerActionLabel(player);
 	clearSeatActionVisualState(getSeatRef(player));
-	setPlayerSeatName(player, "thinking …");
+	setPlayerSeatName(player, t("ui.thinking"));
+
+	const turn = {
+		player,
+		cycles,
+		nextPlayer,
+		signature: getBotTurnSignature(player),
+		startedAt: Date.now(),
+		recoveryAttempts: 0,
+	};
+	activeBotTurn = turn;
 
 	enqueueBotAction(() => {
-		const decision = chooseBotAction(player, gameState);
-		const actionRequest = normalizeBotActionRequest(decision);
-		let resolvedAction = applyTurnAction(player, actionRequest);
-		if (!resolvedAction) {
-			logFlow("bot action fallback", {
-				name: player.name,
-				decision: decision?.action ?? null,
-			});
-			const fallbackActionState = getPlayerActionState(gameState, player);
-			resolvedAction = applyTurnAction(
+		try {
+			const decision = chooseBotAction(player, gameState);
+			const actionRequest = normalizeBotActionRequest(decision);
+			let resolvedAction = applyTurnAction(player, actionRequest);
+			if (!resolvedAction) {
+				logFlow("bot action fallback", {
+					name: player.name,
+					decision: decision?.action ?? null,
+				});
+				const fallbackActionState = getPlayerActionState(gameState, player);
+				resolvedAction = applyTurnAction(
+					player,
+					fallbackActionState.canCheck ? { action: "check" } : { action: "fold" },
+				);
+			}
+			continueAfterResolvedTurn({
 				player,
-				fallbackActionState.canCheck
-					? { action: "check" }
-					: { action: "fold" },
-			);
+				cycles,
+				nextPlayer,
+				logPrefix: "bot",
+				advanceReason: "bot",
+			});
+		} catch (error) {
+			reportBotError("bot-turn", error, player);
+			const recovered = recoverActiveBotTurn(turn, error);
+			if (!recovered && activeBotTurn === turn) {
+				// Let the watchdog make the final attempt instead of stalling here.
+				turn.startedAt = Date.now();
+				return;
+			}
 		}
-		continueAfterResolvedTurn({
-			player,
-			cycles,
-			nextPlayer,
-			logPrefix: "bot",
-			advanceReason: "bot",
-		});
+		if (activeBotTurn === turn) {
+			activeBotTurn = null;
+		}
 	});
 }
 
@@ -3040,9 +3654,7 @@ function startBettingRound(options = {}) {
 		Number.isFinite(resumeTurn.seatIndex) &&
 		Number.isFinite(resumeTurn.cycles)
 	) {
-		const resumePlayer = gameState.players.find((player) =>
-			player.seatIndex === resumeTurn.seatIndex
-		);
+		const resumePlayer = gameState.players.find((player) => player.seatIndex === resumeTurn.seatIndex);
 		if (resumePlayer && !resumePlayer.folded && !resumePlayer.allIn) {
 			runTurn(resumePlayer, resumeTurn.cycles, nextPlayer);
 			return;
@@ -3108,8 +3720,7 @@ function getChipTransferRemainingDuration(chipTransfer) {
 	}
 
 	const endAt = chipTransfer.transfers.reduce(
-		(maxEndAt, transfer) =>
-			Math.max(maxEndAt, chipTransfer.startedAt + transfer.durationMs),
+		(maxEndAt, transfer) => Math.max(maxEndAt, chipTransfer.startedAt + transfer.durationMs),
 		chipTransfer.startedAt,
 	);
 	return Math.max(0, Math.ceil(endAt - Date.now()));
@@ -3158,6 +3769,45 @@ function startChipTransferAnimation(commitPlan, onDone) {
 	}, getChipTransferRemainingDuration(chipTransfer));
 }
 
+// Persist a finished solo-vs-bots tournament into the long-term career profile.
+// Runs after every hand end and no-ops while the human is still seated with chips
+// and more than one player remains; the profile module dedupes by tournament id.
+function saveCompletedSoloTournament() {
+	if (
+		SPEED_MODE || !currentGameSaveEligible || currentTournamentResultSaved ||
+		!currentTournamentId || gameState.handInProgress
+	) {
+		return;
+	}
+	const player = gameState.allPlayers.find((currentPlayer) => !currentPlayer.isBot);
+	if (!player) {
+		return;
+	}
+	const placement = getPlayerTournamentPlacement(gameState.players, player);
+	if (placement === null) {
+		return;
+	}
+	const storage = getLocalStorage();
+	if (!storage) {
+		return;
+	}
+	const saved = savePlayerProfileResult(storage, {
+		id: currentTournamentId,
+		finishedAt: Date.now(),
+		participantCount: gameState.allPlayers.length,
+		placement,
+		stats: createStatsSnapshot(player.stats),
+	});
+	if (saved) {
+		currentTournamentResultSaved = true;
+		playerProfile = readPlayerProfile(storage) ?? playerProfile;
+		syncLogUi();
+		if (!profileOverlay.classList.contains("hidden")) {
+			renderPlayerProfile(profileElements, playerProfile);
+		}
+	}
+}
+
 function finishHandAfterShowdown() {
 	const handEndPlan = createHandEndPlan(gameState);
 	renderPlayerChipStacks();
@@ -3165,8 +3815,11 @@ function finishHandAfterShowdown() {
 	clearActiveTurnPlayer(false);
 	applyGameStatePatch(handEndPlan.gameStatePatch);
 	renderPot();
+	saveCompletedSoloTournament();
 
 	humanTurnController.hide();
+	activeBotTurn = null;
+	clearRunoutWatchdog();
 	if (SPEED_MODE) {
 		queueStateSync();
 		preFlop();
@@ -3191,10 +3844,9 @@ function finishHandAfterShowdown() {
 	updateFastForwardButton();
 	renderStatsOverlay();
 	setSummaryButtonsVisible(true);
-	setStartButtonLabel("New Round");
+	setStartButtonLabel("button.newRound");
 	startButton.classList.remove("hidden");
 	setCurrentFlowState({ type: "between-hands" });
-	startNewRoundCountdown();
 	queueStateSync();
 	saveCurrentGameSnapshot();
 }
@@ -3226,9 +3878,7 @@ function doShowdown() {
 		uncontestedWinner: uncontestedWinner?.name ?? null,
 		uncontestedWinnerSeatIndex: uncontestedWinner?.seatIndex ?? null,
 		mainPotWinners: mainPotWinners.map((player) => player.name),
-		mainPotWinnerSeatIndexes: mainPotWinners.map((player) =>
-			player.seatIndex
-		),
+		mainPotWinnerSeatIndexes: mainPotWinners.map((player) => player.seatIndex),
 		winningPlayers: winningPlayers.map((player) => player.name),
 		winningSeatIndexes: winningPlayers.map((player) => player.seatIndex),
 		potResults: potResults.map((result) => ({ ...result })),
@@ -3266,9 +3916,10 @@ function doShowdown() {
 			applyBotReveal(uncontestedWinner, revealDecision);
 			registerBotReveal(uncontestedWinner);
 			enqueueNotification(
-				`${uncontestedWinner.name} reveals ${
-					revealDecision.codes.map(formatCardLabel).join(" ")
-				}`,
+				tf("notify.reveals", {
+					name: uncontestedWinner.name,
+					cards: revealDecision.codes.map(formatCardLabel).join(" "),
+				}),
 			);
 		} else {
 			hidePlayerQr(uncontestedWinner);
@@ -3285,7 +3936,7 @@ function doShowdown() {
 			showdownPlayers: activePlayers,
 			totalPayoutByPlayer,
 		});
-		enqueueNotification(`${uncontestedWinner.name} wins ${totalPot}!`);
+		enqueueNotification(tf("notify.winsPot", { name: uncontestedWinner.name, amount: totalPot }));
 		startChipTransferAnimation(commitPlan, () => {
 			finishHandAfterShowdown();
 		});
@@ -3293,9 +3944,7 @@ function doShowdown() {
 	}
 
 	// Skip pure refund-only side pots in the log. They animate correctly, but they are not real wins.
-	const filteredResults = potResults.filter((result) =>
-		result.isRefundOnly !== true
-	);
+	const filteredResults = potResults.filter((result) => result.isRefundOnly !== true);
 
 	// --- Notification Consolidation ----------------------------------------------
 	// Consolidate notifications: if same player wins all pots, combine amounts
@@ -3306,20 +3955,38 @@ function doShowdown() {
 		);
 		if (allSame) {
 			const total = filteredResults.reduce((sum, r) => sum + r.amount, 0);
-			let msg = `${filteredResults[0].players[0]} wins ${total}`;
-			if (filteredResults[0].hand) {
-				msg += ` with ${filteredResults[0].hand}`;
-			}
-			enqueueNotification(msg);
+			const handText = filteredResults[0].hand ? translateHandName(filteredResults[0].hand) : null;
+			enqueueNotification(
+				handText
+					? tf("notify.winsWith", {
+						name: filteredResults[0].players[0],
+						amount: total,
+						hand: handText,
+					})
+					: tf("notify.wins", {
+						name: filteredResults[0].players[0],
+						amount: total,
+					}),
+			);
 		} else {
 			filteredResults.forEach((r) => {
 				if (r.players.length === 1) {
-					let msg = `${r.players[0]} wins ${r.amount}`;
-					if (r.hand) msg += ` with ${r.hand}`;
-					enqueueNotification(msg);
+					const handText = r.hand ? translateHandName(r.hand) : null;
+					enqueueNotification(
+						handText
+							? tf("notify.winsWith", {
+								name: r.players[0],
+								amount: r.amount,
+								hand: handText,
+							})
+							: tf("notify.wins", {
+								name: r.players[0],
+								amount: r.amount,
+							}),
+					);
 				} else {
 					enqueueNotification(
-						`${r.players.join(" & ")} split ${r.amount}`,
+						tf("notify.split", { names: r.players.join(" / "), amount: r.amount }),
 					);
 				}
 			});
@@ -3369,8 +4036,28 @@ App Bootstrap And Public API
 ---------------------------------------------------------------------------------------------------*/
 
 function init() {
-	initSound();
-	initSoundButton(soundButton);
+	renderLangButton();
+	langButton.addEventListener("click", () => {
+		setLang(getLang() === "zh" ? "en" : "zh");
+	}, false);
+	onLangChange(() => {
+		renderLangButton();
+		applyStaticTranslations();
+		renderStartButtonLabel();
+		updateHandStrengthDisplays();
+		if (playerProfile && !profileOverlay.classList.contains("hidden")) {
+			renderPlayerProfile(profileElements, playerProfile);
+		}
+	});
+	try {
+		const storage = getLocalStorage();
+		playerProfile = storage ? readPlayerProfile(storage) : createEmptyPlayerProfile();
+	} catch {
+		playerProfile = createEmptyPlayerProfile();
+	}
+	// Surface the career button right after a page refresh if results are stored.
+	syncLogUi();
+	applyStaticTranslations();
 
 	// Prevent framing
 	if (globalThis.top !== globalThis.self) {
@@ -3378,10 +4065,10 @@ function init() {
 			globalThis.top.location.href = globalThis.location.href;
 		} catch {
 			alert(
-				"No framing allowed. Please visit: https://tehes.github.io/poker/",
+				t("ui.frameBlockedAlert"),
 			);
 			throw new Error(
-				"No framing allowed. Open the original: https://tehes.github.io/poker/",
+				t("ui.frameBlockedError"),
 			);
 		}
 	}
@@ -3396,12 +4083,27 @@ function init() {
 			closeAllOverlays();
 		}
 	}, false);
+	document.addEventListener("keydown", (ev) => {
+		const target = ev.target;
+		const isTypingTarget = target instanceof HTMLElement &&
+			(target.tagName === "INPUT" ||
+				target.tagName === "TEXTAREA" ||
+				target.tagName === "SELECT" ||
+				target.isContentEditable);
+		if (
+			isTypingTarget || ev.ctrlKey || ev.altKey || ev.metaKey ||
+			ev.key.length !== 1
+		) {
+			return;
+		}
+		cheatKeyBuffer = (cheatKeyBuffer + ev.key).toLowerCase().slice(-4);
+		if (cheatKeyBuffer === "show") {
+			cheatKeyBuffer = "";
+			openOverlay("cheat");
+		}
+	}, false);
 	startButton.addEventListener("click", startGame, false);
-	newRoundCancelButton.addEventListener(
-		"click",
-		cancelNewRoundCountdown,
-		false,
-	);
+	replayButton.addEventListener("click", restartTournament, false);
 	instructionsButton.addEventListener(
 		"click",
 		() => openOverlay("instructions"),
@@ -3414,6 +4116,7 @@ function init() {
 	);
 	notification.addEventListener("click", () => openOverlay("log"), false);
 	statsButton.addEventListener("click", () => openOverlay("stats"), false);
+	profileButton.addEventListener("click", () => openOverlay("profile"), false);
 	logButton.addEventListener("click", () => openOverlay("log"), false);
 	fastForwardButton.addEventListener("click", activateFastForward, false);
 	statsCloseButton.addEventListener(
@@ -3422,6 +4125,11 @@ function init() {
 		false,
 	);
 	logCloseButton.addEventListener("click", () => closeOverlay("log"), false);
+	profileCloseButton.addEventListener(
+		"click",
+		() => closeOverlay("profile"),
+		false,
+	);
 	versionCloseButton.addEventListener(
 		"click",
 		() => closeOverlay("version"),
@@ -3432,8 +4140,35 @@ function init() {
 		() => closeOverlay("instructions"),
 		false,
 	);
+	cheatCloseButton.addEventListener("click", () => closeOverlay("cheat"), false);
 	resumeContinueButton?.addEventListener("click", continueSavedGame, false);
 	resumeNewButton?.addEventListener("click", discardSavedGame, false);
+	initCheatPanel({
+		getTableState: getCheatTableState,
+		swapCard: applyCheatCardSwap,
+		syncTableCardHover: syncCheatTableCardHover,
+	});
+	// Last-resort guard: if some future bot queue path throws outside runBotTurn's own
+	// catch, still unblock the queue and try to finish the active turn.
+	setBotActionErrorHandler((error) => {
+		if (activeBotTurn) {
+			recoverActiveBotTurn(activeBotTurn, error);
+		} else {
+			reportBotError("bot-queue", error);
+		}
+	});
+	setInterval(checkBotTurnWatchdog, 1500);
+	setInterval(checkRunoutWatchdog, 1500);
+	// Uncaught errors in timers/click handlers are exactly what used to freeze the
+	// table silently; keep the last few in poker.diagnostics for later inspection.
+	globalThis.addEventListener("error", (event) => {
+		const error = event.error instanceof Error ? event.error : new Error(event.message || "window error");
+		reportBotError("window-error", error, null);
+	});
+	globalThis.addEventListener("unhandledrejection", (event) => {
+		const error = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
+		reportBotError("unhandled-rejection", error, null);
+	});
 	overlayBackdrop.addEventListener("click", () => {
 		if (!isBlockingOverlayOpen()) {
 			closeAllOverlays();
@@ -3464,6 +4199,17 @@ function init() {
 	for (const closeButton of closeButtons) {
 		closeButton.addEventListener("click", deletePlayer, false);
 	}
+	for (const seatRef of seatRefs) {
+		// Commit a seat rename on Enter or when the badge loses focus.
+		seatRef.nameEl.addEventListener("focus", () => prepareSeatRename(seatRef));
+		seatRef.nameEl.addEventListener("keydown", (ev) => {
+			if (ev.key === "Enter") {
+				ev.preventDefault();
+				seatRef.nameEl.blur();
+			}
+		});
+		seatRef.nameEl.addEventListener("focusout", () => applySeatRename(seatRef));
+	}
 
 	const savedGameSnapshot = readSavedGameSnapshot();
 	if (savedGameSnapshot) {
@@ -3488,6 +4234,25 @@ globalThis.poker = {
 			reveals: player.stats.reveals,
 		}));
 	},
+	get diagnostics() {
+		return botDiagnostics.slice();
+	},
+	get activeSeatIndex() {
+		return gameState.activeSeatIndex;
+	},
+	get flowState() {
+		return { ...currentFlowState };
+	},
+	get runoutWatchdog() {
+		return runoutWatchdog
+			? {
+				at: runoutWatchdog.at,
+				phaseIndex: runoutWatchdog.phaseIndex,
+				boardCount: runoutWatchdog.boardCount,
+				attempts: runoutWatchdog.attempts ?? 0,
+			}
+			: null;
+	},
 };
 
 poker.init();
@@ -3498,8 +4263,8 @@ poker.init();
  * - SERVICE_WORKER_VERSION: bump to force new SW and new cache
  * - AUTO_RELOAD_ON_SW_UPDATE: reload page once after an update
  -------------------------------------------------------------------------------------------------- */
-const USE_SERVICE_WORKER = true;
-const SERVICE_WORKER_VERSION = "2026-10-13-v1";
+const USE_SERVICE_WORKER = false;
+const SERVICE_WORKER_VERSION = "2026-11-17-v5";
 const AUTO_RELOAD_ON_SW_UPDATE = true;
 
 initServiceWorker({

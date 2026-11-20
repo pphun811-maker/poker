@@ -12,6 +12,7 @@ import {
 	getBlindLevelUpdateForHand,
 	getNextBettingRoundStep,
 	getNextPhasePlan,
+	getPlayerTournamentPlacement,
 	getResolvedTurnContinuation,
 	hasPendingBettingRoundAction,
 	isAllInRunout,
@@ -1375,6 +1376,7 @@ Deno.test("createBettingRoundStartPlan creates missing hand and spot state", () 
 				voluntaryThisStreet: false,
 				aggressiveThisStreet: false,
 				enteredPreflop: false,
+				sawFlop: false,
 			},
 			roundBet: 0,
 		},
@@ -2010,6 +2012,7 @@ Deno.test("dealCommunityCardsForPhase burns and deals without mutating state", (
 	assertEquals(result, {
 		burnedCard: "2C",
 		dealtCards: ["3C"],
+		playerPatches: [],
 		gameStatePatch: {
 			deck: ["4C", "5C"],
 			cardGraveyard: ["AS", "2C", "3C"],
@@ -2029,6 +2032,56 @@ Deno.test("dealCommunityCardsForPhase rejects overfilled boards without mutating
 
 	assertEquals(dealCommunityCardsForPhase(gameState, 2), null);
 	assertEquals(gameState, gameStateBefore);
+});
+
+Deno.test("flop deal marks live players as having seen the flop", () => {
+	const stayed = createPlayer({ name: "Stayed", seatIndex: 0, stats: createStats(), spotState: {} });
+	const folded = createPlayer({
+		name: "Folded",
+		seatIndex: 1,
+		stats: createStats(),
+		folded: true,
+		spotState: {},
+	});
+	const gameState = {
+		deck: ["2C", "3C", "4C", "5C"],
+		cardGraveyard: ["AS"],
+		communityCards: [],
+		players: [stayed, folded],
+	};
+
+	const result = dealCommunityCardsForPhase(gameState, 3);
+
+	assertEquals(result.playerPatches, [
+		{
+			player: stayed,
+			patch: {
+				spotState: { ...stayed.spotState, sawFlop: true },
+				stats: { ...stayed.stats, flopsSeen: 1 },
+			},
+		},
+	]);
+	// Turn cards do not produce flop patches.
+	const turnResult = dealCommunityCardsForPhase({
+		...gameState,
+		communityCards: ["KH", "QD", "JS"],
+	}, 1);
+	assertEquals(turnResult.playerPatches, []);
+});
+
+Deno.test("getPlayerTournamentPlacement ranks the champion and busted stacks", () => {
+	const champion = createPlayer({ name: "Champion", seatIndex: 0, chips: 2000 });
+	const runnerUp = createPlayer({ name: "Runner-Up", seatIndex: 1, chips: 0, totalBet: 2000 });
+	const third = createPlayer({ name: "Third", seatIndex: 2, chips: 0, totalBet: 500 });
+	const players = [champion, runnerUp, third];
+
+	assertEquals(getPlayerTournamentPlacement(players, champion), 1);
+	assertEquals(getPlayerTournamentPlacement(players, runnerUp), 2);
+	assertEquals(getPlayerTournamentPlacement(players, third), 3);
+	assertEquals(getPlayerTournamentPlacement(players, createPlayer({ name: "Ghost", seatIndex: 3 })), null);
+	// A player with chips is only "placed" once nobody else has chips.
+	const alive = createPlayer({ name: "Alive", seatIndex: 3, chips: 800 });
+	assertEquals(getPlayerTournamentPlacement([champion, alive], champion), null);
 });
 
 Deno.test("heads-up setup makes dealer the small blind and starts preflop action on the dealer", () => {

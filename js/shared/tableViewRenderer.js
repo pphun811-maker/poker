@@ -2,6 +2,8 @@
 MODULE BOUNDARY: Shared Table View Renderer
 ================================================================================================== */
 
+import { t } from "../i18n.js";
+
 // CURRENT STATE: Shared DOM renderer for host and synced table views, including transient seat and
 // chip-transfer visuals.
 // TARGET STATE: Stay render-only. Callers should decide poker rules, visibility policy, and flow
@@ -178,18 +180,25 @@ function renderDisplayedChipTransferState(target, finalPot, players, chipTransfe
 export function getActionLabelBadgeText(actionName = "") {
 	switch (actionName) {
 		case "fold":
-			return "Fold";
+			return t("action.fold");
 		case "check":
-			return "Check";
+			return t("action.check");
 		case "call":
-			return "Call";
+			return t("action.call");
 		case "raise":
-			return "Raise";
+			return t("action.raise");
 		case "allin":
-			return "All-In";
+			return t("action.allin");
 		default:
 			return "";
 	}
+}
+
+// While a seat badge is being edited, transient writes (action labels, thinking
+// state) must not clobber the in-progress text.
+function isSeatNameEditing(target) {
+	const nameEl = getNameEl(target);
+	return !!nameEl && nameEl === globalThis.document?.activeElement;
 }
 
 export function clearSeatActionLabel(target, playerName = "") {
@@ -200,7 +209,9 @@ export function clearSeatActionLabel(target, playerName = "") {
 		return;
 	}
 	seatEl.classList.remove("action-label");
-	nameEl.textContent = playerName;
+	if (!isSeatNameEditing(target)) {
+		nameEl.textContent = playerName;
+	}
 	if (typeof target.clearActionLabelState === "function") {
 		target.clearActionLabelState();
 	}
@@ -213,7 +224,7 @@ export function renderSeatActionLabel(
 	const seatEl = getSeatEl(target);
 	const nameEl = getNameEl(target);
 	cancelSeatActionLabelTimer(target);
-	if (!seatEl || !nameEl) {
+	if (!seatEl || !nameEl || isSeatNameEditing(target)) {
 		return;
 	}
 
@@ -296,9 +307,7 @@ export function showWinnerReaction(target, emoji = "", visibleUntil = 0) {
 		return;
 	}
 
-	const remainingDuration = Number.isFinite(visibleUntil)
-		? Math.max(0, visibleUntil - Date.now())
-		: 0;
+	const remainingDuration = Number.isFinite(visibleUntil) ? Math.max(0, visibleUntil - Date.now()) : 0;
 	if (remainingDuration === 0) {
 		clearWinnerReaction(target);
 		return;
@@ -601,7 +610,9 @@ export function renderHostSeat(seatRef, seatState = {}) {
 		return;
 	}
 
-	seatRef.nameEl.textContent = seatState.name ?? "";
+	if (!isSeatNameEditing(seatRef)) {
+		seatRef.nameEl.textContent = seatState.name ?? "";
+	}
 	seatRef.totalEl.textContent = `${seatState.chips ?? 0}`;
 	seatRef.betEl.textContent = `${seatState.roundBet ?? 0}`;
 	seatRef.dealerEl.classList.toggle("hidden", seatState.dealer !== true);
@@ -634,9 +645,7 @@ export function renderProjectedSeat(
 ) {
 	const isOwnSeat = publicSeat.seatIndex === ownSeatIndex && ownSeatView;
 	const holeCards = isOwnSeat ? ownSeatView.holeCards : publicSeat.publicHoleCards;
-	const handStrengthLabel = isOwnSeat
-		? ownSeatView.handStrengthLabel
-		: publicSeat.handStrengthLabel;
+	const handStrengthLabel = isOwnSeat ? ownSeatView.handStrengthLabel : publicSeat.handStrengthLabel;
 	const showWinProbability = isOwnSeat
 		? ownSeatView.showWinProbability === true
 		: publicSeat.showWinProbability === true;
@@ -657,9 +666,7 @@ export function renderProjectedSeat(
 	renderSeatPill(seatRef.handStrengthEl, handStrengthLabel);
 	renderSeatPill(
 		seatRef.winProbabilityEl,
-		showWinProbability && typeof winProbability === "number"
-			? `${Math.round(winProbability)}%`
-			: "",
+		showWinProbability && typeof winProbability === "number" ? `${Math.round(winProbability)}%` : "",
 		showWinProbability,
 	);
 }

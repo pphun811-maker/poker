@@ -400,7 +400,7 @@ def test_human_seat_duel(client):
 def test_insights_endpoint(client):
     print("== insights endpoint (LLM decision tool) ==")
     try:
-        game = client.create_game(agent_name="InsightsAgent", bots=2, chips=500)
+        game = client.create_game(agent_name="InsightsAgent", bots=2, chips=1000)
         game_id, token = game["gameId"], game["seatToken"]
 
         try:
@@ -413,7 +413,9 @@ def test_insights_endpoint(client):
         hand_results = 0
         seen_postflop_equity = False
         guard = 0
-        while hand_results < 6 and guard < 800:
+        # Play until a flop is actually seen (or the tournament ends): with deep stacks most hands
+        # reach the flop, but a preflop all-in war can legitimately end several hands early.
+        while guard < 1500 and not seen_postflop_equity:
             guard += 1
             response = client.state(game_id, token, since=since, wait=True, wait_timeout_ms=600000)
             check(response.get("waitTimedOut") is not True, "event delivered for insights walk")
@@ -431,6 +433,8 @@ def test_insights_endpoint(client):
             audit_no_card_leaks(insights, "insights payload")
             check(insights.get("ok") is True, "insights payload ok")
             check(insights.get("handId") == state.get("handId"), "insights matches current hand")
+            check(isinstance(insights.get("headline"), list) and insights["headline"],
+                  "insights carries a compact headline")
             equity = insights.get("equity") or {}
             if (state.get("communityCards") or []):
                 check(equity.get("available") is True, "equity available once cards are out")
@@ -443,6 +447,12 @@ def test_insights_endpoint(client):
                     equity.get("stderrPct", 100) < 100,
                     "stderr reported alongside equity",
                 )
+                vs_range = equity.get("vsRangePct")
+                check(vs_range is None or 0 <= vs_range <= 100,
+                      "vsRangePct within [0,100] when present")
+                if equity.get("rangeSamples") is not None:
+                    check(equity["rangeSamples"] <= 8000,
+                          "range sampling capped independently of random-equity samples")
             economics = insights.get("economics") or {}
             check(economics.get("pot") == state.get("pot"), "economics pot matches state")
             check("potOddsPct" in economics and "spr" in economics, "economics carries odds + SPR")
@@ -452,7 +462,59 @@ def test_insights_endpoint(client):
                   "position seatClass classified")
             blinds = insights.get("blinds") or {}
             check(blinds.get("bigBlind") == state.get("bigBlind"), "blinds mirror state")
+
+            preflop = insights.get("preflop")
+            if state.get("phase") == "preflop":
+                check(preflop is not None, "preflop decision table present before the flop")
+                check(preflop.get("spot") in
+                      ("unopened", "unopenedCheck", "facingLimp", "facingRaise",
+                       "facing3Bet", "facingAllIn"),
+                      f"preflop spot classified: {preflop.get('spot')}")
+                check(preflop.get("suggestedAction") in
+                      ("fold", "check", "call", "raise", "allin"),
+                      "preflop suggested action is a legal action family")
+                check(0 < preflop.get("topPercent", 0) <= 100,
+                      "preflop hand percentile in (0,100]")
+                check(preflop.get("handClass") and
+                      2 <= len(preflop["handClass"]) <= 3,
+                      "preflop hand class rendered")
+            else:
+                check(preflop is None, "preflop table omitted after the flop")
+
+            draws = insights.get("draws")
+            board_cards = state.get("communityCards") or []
+            if len(board_cards) >= 3:
+                check(draws is not None and draws.get("available") is True,
+                      "draw detector available postflop")
+                outs = draws.get("outs") or {}
+                check(isinstance(outs.get("clean"), int) and outs["clean"] >= 0,
+                      "clean outs reported")
+                check(draws.get("unknownCardCount") == 52 - 2 - len(board_cards),
+                      "draw unknown-card count matches public cards")
+                if draws.get("flushDraw"):
+                    check(draws["flushDraw"].get("outs") == 9,
+                          "flush draw reports 9 outs")
+                if board_cards:
+                    check(0 <= draws.get("byRiverCompletionPct", -1) <= 100,
+                          "draw completion percentage in [0,100]")
+            else:
+                check(draws is None, "draw detector omitted preflop")
+
+            sizing = insights.get("sizing")
+            check(sizing is not None, "sizing helper present while seated")
             action_state = state.get("actionState") or {}
+            check(sizing.get("legal", {}).get("needToCall") == action_state.get("needToCall"),
+                  "sizing legal block mirrors actionState")
+            check(isinstance(sizing.get("amountSemantics"), str) and
+                  "additional chips" in sizing["amountSemantics"],
+                  "sizing spells out amount semantics")
+            for option in sizing.get("options") or []:
+                check(option.get("raiseToTotal") == sizing.get("roundBet", 0) + option.get("amount", 0),
+                      "sizing raiseToTotal = roundBet + amount")
+                check(option.get("amount", 0) >= 0, "sizing amount is non-negative")
+                check(option.get("amount", 0) <= sizing.get("legal", {}).get("maxRaiseAmount", 0),
+                      "sizing option within max raise")
+
             action = "check" if action_state.get("canCheck") else "call"
             client.act(game_id, token, action)
 
@@ -479,6 +541,33 @@ def test_insights_endpoint(client):
         insights = insights_request(client, game_id, token, samples=999999)
         check((insights.get("equity") or {}).get("samples") in (None, 25000),
               "oversized sample request is clamped to 25000")
+
+        # Post-game audit endpoint: every decision in this walk was preceded by an insights call.
+        report = client._request("GET", f"/games/{game_id}/report?token={token}")
+        audit_no_card_leaks(report, "report payload")
+        check(report.get("ok") is True, "report endpoint responds")
+        check(report.get("handsPlayed") == hand_results,
+              "report hand count matches observed hand results")
+        check(len(report.get("hands") or []) == hand_results,
+              "report per-hand summaries match hand count")
+        decisions = report.get("decisions") or {}
+        check(isinstance(decisions.get("total"), int), "report decision count present")
+        if decisions.get("total", 0) > 0:
+            check(decisions.get("withInsights") == decisions.get("total"),
+                  "every audited decision was covered by an insights call")
+            check(decisions.get("coveragePct") == 100.0,
+                  "insights coverage is 100% in the disciplined walk")
+            check(len(report.get("decisionLog") or []) >= 1,
+                  "report includes a compact decision trail")
+        check(isinstance(report.get("violations"), list),
+              "report exposes a violations list")
+        check(isinstance(report.get("flagCounts"), dict),
+              "report exposes violation counts")
+        try:
+            client._request("GET", f"/games/{game_id}/report?token=wrong-token")
+            raise TestFailure("report accepted a bad token")
+        except PokerApiError as error:
+            check(error.status == 401, "report requires the seat token (401)")
     finally:
         try:
             client._request("DELETE", f"/games/{game_id}")

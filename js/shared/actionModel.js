@@ -1,6 +1,8 @@
 /* ==================================================================================================
 MODULE BOUNDARY: Shared Action Model
-================================================================================================== */
+================================================================================================== */
+
+import { t, tf } from "../i18n.js";
 
 // CURRENT STATE: Single shared source of truth for check, call, raise, and all-in amount math used
 // by host and seat controls.
@@ -48,15 +50,15 @@ export function getEffectiveRaiseCap(gameState, player) {
 
 export function getActionButtonLabel(amount, actionState) {
 	if (amount === 0) {
-		return "Check";
+		return t("action.check");
 	}
 	if (amount === actionState.maxAmount) {
-		return "All-In";
+		return t("action.allin");
 	}
 	if (amount === actionState.needToCall) {
-		return "Call";
+		return t("action.call");
 	}
-	return "Raise";
+	return t("action.raise");
 }
 
 export function clampActionAmount(amount, actionState) {

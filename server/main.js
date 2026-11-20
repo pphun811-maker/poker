@@ -28,6 +28,7 @@ const MAX_STARTING_CHIPS = 1000000;
 const DEFAULT_WAIT_TIMEOUT_MS = 600000;
 const MAX_WAIT_TIMEOUT_MS = 3600000;
 const MAX_STREAM_MESSAGES = 30000;
+const MAX_AUDIT_ENTRIES = 5000;
 const ACTION_FOLD = 1;
 const ACTION_CHECK = 2;
 const ACTION_CALL = 3;
@@ -199,6 +200,12 @@ function createGame(config) {
 		champion: null,
 		errorMessage: null,
 		handResults: [],
+		// Audit trail for /report: every insights call and every submitted decision, per seat.
+		// Only public numbers and action metadata are stored; no cards beyond the agent's own view.
+		insightsCalls: [],
+		decisionLog: [],
+		agentPlacement: null,
+		agentFinalChips: null,
 		waiters: new Set(),
 		createdAt: new Date().toISOString(),
 	};
@@ -235,6 +242,7 @@ function handleWorkerMessage(game, message) {
 	}
 	if (message.type === "hand_result") {
 		game.handResults.push(message);
+		trackHandResult(game, message);
 	}
 
 	if (message.type === "turn") {
@@ -261,6 +269,7 @@ function handleWorkerMessage(game, message) {
 		game.turnInFlight = false;
 		game.status = "finished";
 		game.champion = message.champion ?? null;
+		trackGameOver(game, message);
 	} else if (message.type === "error") {
 		game.pendingTurn = null;
 		game.turnInFlight = false;
@@ -335,6 +344,210 @@ function resolveSeatForToken(game, token) {
 
 function getLatestState(game) {
 	return game.messages[game.messages.length - 1]?.state ?? null;
+}
+
+function round1(value) {
+	return Math.round(value * 10) / 10;
+}
+
+function trackHandResult(game, message) {
+	const state = message.state ?? {};
+	const busted = state.bustedPlayers ?? [];
+	const me = (state.players ?? []).find((player) => player.seatIndex === 0);
+	game.agentFinalChips = me ? (me.chips ?? 0) : 0;
+	if (busted.some((player) => player.seatIndex === 0) && game.agentPlacement === null) {
+		const bustedSeats = new Set(busted.map((player) => player.seatIndex));
+		const remaining = (state.players ?? []).filter((player) =>
+			!bustedSeats.has(player.seatIndex) && (player.chips ?? 0) > 0
+		).length;
+		game.agentPlacement = Math.max(1, remaining + 1);
+	}
+}
+
+function trackGameOver(game, message) {
+	if (message.champion?.seatIndex === 0) {
+		game.agentPlacement = 1;
+		const me = (message.state?.players ?? []).find((player) => player.seatIndex === 0);
+		game.agentFinalChips = me ? (me.chips ?? 0) : null;
+	}
+}
+
+function recordInsightsCall(game, seatIndex, payload) {
+	const latest = game.messages[game.messages.length - 1];
+	game.insightsCalls.push({
+		at: new Date().toISOString(),
+		// Revision of the newest state when the tool was called. A decision is "covered" when an
+		// insights call exists at or after its turn snapshot.
+		revision: latest?.revision ?? 0,
+		seatIndex,
+		handId: payload.handId ?? null,
+		phase: payload.phase ?? null,
+		equityPct: payload.equity?.equityPct ?? null,
+		vsRangePct: payload.equity?.vsRangePct ?? null,
+		callBreakevenEquityPct: payload.economics?.callBreakevenEquityPct ?? null,
+		potOddsPct: payload.economics?.potOddsPct ?? null,
+		mRatio: payload.economics?.mRatio ?? null,
+		shoveRangeEquityPct: payload.shove?.rangeEquityPct ?? null,
+		shoveBreakevenPct: payload.shove?.callBreakevenEquityPct ?? null,
+		preflopSuggestedAction: payload.preflop?.suggestedAction ?? null,
+	});
+	if (game.insightsCalls.length > MAX_AUDIT_ENTRIES) {
+		game.insightsCalls.splice(0, game.insightsCalls.length - MAX_AUDIT_ENTRIES);
+	}
+}
+
+function findInsightsForTurn(game, seatIndex, turnRevision) {
+	for (let index = game.insightsCalls.length - 1; index >= 0; index--) {
+		const call = game.insightsCalls[index];
+		if (call.seatIndex === seatIndex && call.revision >= turnRevision) {
+			return call;
+		}
+	}
+	return null;
+}
+
+function recordDecision(game, seatIndex, turn, request, submittedBody) {
+	const matching = findInsightsForTurn(game, seatIndex, turn.revision);
+	const state = getLatestState(game);
+	game.decisionLog.push({
+		at: new Date().toISOString(),
+		revision: turn.revision,
+		seatIndex,
+		handId: state?.handId ?? null,
+		phase: state?.phase ?? null,
+		action: request.action,
+		amount: request.amount ?? null,
+		submittedAction: submittedBody.action ?? null,
+		submittedAmount: submittedBody.amount ?? null,
+		hadInsights: matching !== null,
+		insights: matching
+			? {
+				equityPct: matching.equityPct,
+				vsRangePct: matching.vsRangePct,
+				callBreakevenEquityPct: matching.callBreakevenEquityPct,
+				potOddsPct: matching.potOddsPct,
+				mRatio: matching.mRatio,
+				shoveRangeEquityPct: matching.shoveRangeEquityPct,
+				shoveBreakevenPct: matching.shoveBreakevenPct,
+				preflopSuggestedAction: matching.preflopSuggestedAction,
+			}
+			: null,
+	});
+	if (game.decisionLog.length > MAX_AUDIT_ENTRIES) {
+		game.decisionLog.splice(0, game.decisionLog.length - MAX_AUDIT_ENTRIES);
+	}
+}
+
+function auditDecision(entry) {
+	const flags = [];
+	const insights = entry.insights;
+	if (!insights || entry.action !== "call") {
+		return flags;
+	}
+	if (insights.shoveRangeEquityPct !== null && insights.shoveBreakevenPct !== null) {
+		if (insights.shoveRangeEquityPct < insights.shoveBreakevenPct + 5) {
+			flags.push("call_below_shove_range_rule");
+		}
+		return flags;
+	}
+	const equity = insights.vsRangePct ?? insights.equityPct;
+	if (
+		equity !== null &&
+		insights.callBreakevenEquityPct !== null &&
+		equity + 1 < insights.callBreakevenEquityPct
+	) {
+		flags.push("call_below_breakeven_equity");
+	}
+	return flags;
+}
+
+function buildReport(game, seatIndex) {
+	const decisions = game.decisionLog.filter((entry) => entry.seatIndex === seatIndex);
+	const insightsCalls = game.insightsCalls.filter((call) => call.seatIndex === seatIndex);
+	const flagCounts = {};
+	const violations = [];
+	for (const decision of decisions) {
+		const flags = auditDecision(decision);
+		if (flags.length === 0) {
+			continue;
+		}
+		for (const flag of flags) {
+			flagCounts[flag] = (flagCounts[flag] ?? 0) + 1;
+		}
+		if (violations.length < 100) {
+			violations.push({
+				handId: decision.handId,
+				phase: decision.phase,
+				action: decision.action,
+				amount: decision.amount,
+				flags,
+				insights: decision.insights,
+			});
+		}
+	}
+
+	const hands = [];
+	let previousChips = game.config.startingChips;
+	for (const hand of game.handResults) {
+		const state = hand.state ?? {};
+		const me = (state.players ?? []).find((player) => player.seatIndex === seatIndex);
+		const busted = (state.bustedPlayers ?? []).some((player) => player.seatIndex === seatIndex);
+		const chipsAfter = me ? (me.chips ?? 0) : 0;
+		hands.push({
+			handId: hand.handId ?? state.handId ?? null,
+			board: state.communityCards ?? [],
+			totalPot: state.totalPot ?? null,
+			winners: (state.winners ?? []).map((winner) => winner.name),
+			hadShowdown: state.hadShowdown === true,
+			seatDelta: chipsAfter - previousChips,
+			seatChipsAfter: chipsAfter,
+			seatBusted: busted,
+		});
+		previousChips = chipsAfter;
+	}
+
+	const latestState = getLatestState(game);
+	const latestPlayer = (latestState?.players ?? []).find((player) => player.seatIndex === seatIndex);
+	const currentChips = latestPlayer ? (latestPlayer.chips ?? 0) : 0;
+	const finalChips = seatIndex === 0 && game.agentFinalChips !== null ? game.agentFinalChips : currentChips;
+	const placement = game.champion?.seatIndex === seatIndex ? 1 : seatIndex === 0 ? game.agentPlacement : null;
+	const covered = decisions.filter((entry) => entry.hadInsights).length;
+
+	return {
+		ok: true,
+		gameId: game.id,
+		status: game.status,
+		champion: game.champion,
+		seatIndex,
+		handsPlayed: game.handResults.length,
+		startingChips: game.config.startingChips,
+		finalChips,
+		netChips: finalChips - game.config.startingChips,
+		placement,
+		decisions: {
+			total: decisions.length,
+			withInsights: covered,
+			coveragePct: decisions.length > 0 ? round1((covered / decisions.length) * 100) : null,
+		},
+		insightsCalls: insightsCalls.length,
+		flagCounts,
+		violations,
+		hands,
+		// Compact decision trail for post-game review; the full stream remains available via
+		// /history. Capped so a 1000-turn game cannot blow up the response.
+		decisionLog: decisions.slice(-200).map((entry) => ({
+			handId: entry.handId,
+			phase: entry.phase,
+			action: entry.action,
+			amount: entry.amount,
+			hadInsights: entry.hadInsights,
+			equityPct: entry.insights?.equityPct ?? null,
+			vsRangePct: entry.insights?.vsRangePct ?? null,
+			callBreakevenEquityPct: entry.insights?.callBreakevenEquityPct ?? null,
+			shoveRangeEquityPct: entry.insights?.shoveRangeEquityPct ?? null,
+			shoveBreakevenPct: entry.insights?.shoveBreakevenPct ?? null,
+		})),
+	};
 }
 
 function buildStateResponse(game, deliveredMessage = null) {
@@ -490,6 +703,9 @@ function submitAction(game, body, seatIndex) {
 	}
 
 	const { request, code } = buildSubmittedAction(actionState, body.action, body.amount);
+	// Audit before clearing pendingTurn: the turn revision links this decision to the insights call
+	// that preceded it.
+	recordDecision(game, seatIndex, game.pendingTurn, request, body);
 
 	console.log(
 		`ACT game=${game.id.slice(0, 8)} seat=${seatIndex} action=${body.action} amount=${
@@ -669,7 +885,7 @@ async function handleRequest(request) {
 		});
 	}
 
-	const gameMatch = path.match(/^\/games\/([0-9a-f-]+)(\/(state|action|history|insights))?$/);
+	const gameMatch = path.match(/^\/games\/([0-9a-f-]+)(\/(state|action|history|insights|report))?$/);
 	if (gameMatch) {
 		const game = getGame(gameMatch[1]);
 		const sub = gameMatch[3] ?? null;
@@ -734,16 +950,26 @@ async function handleRequest(request) {
 			const samples = clampInsightSamples(
 				getQueryInt(url, "samples", DEFAULT_INSIGHT_SAMPLES),
 			);
+			const seatIndex = resolveSeatForToken(game, token) ?? 0;
 			// Built exclusively from sanitized state views + the hand_result stream; the equity
 			// estimator samples hypothetical hands from the public unseen pool and never touches
 			// the engine deck or opponents' actual holdings. Both remote seats may call it — the
 			// perspective (equity, reads) is always the CALLING seat's own public information.
-			return json_response(buildInsights({
+			const insights = buildInsights({
 				state: getLatestState(game),
 				handResults: game.handResults,
-				agentSeatIndex: resolveSeatForToken(game, token) ?? 0,
+				agentSeatIndex: seatIndex,
 				samples,
-			}));
+			});
+			recordInsightsCall(game, seatIndex, insights);
+			return json_response(insights);
+		}
+
+		if (sub === "report" && request.method === "GET") {
+			const token = url.searchParams.get("token");
+			requireToken(game, token);
+			const seatIndex = resolveSeatForToken(game, token) ?? 0;
+			return json_response(buildReport(game, seatIndex));
 		}
 
 		throw new RequestError("Unsupported method or path", 405);

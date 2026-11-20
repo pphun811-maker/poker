@@ -62,7 +62,7 @@ MODULE BOUNDARY: Bot Decision Engine
 // Measure first, then change. Keep each pass focused enough that its effect can be understood.
 // A change is good only if it creates more plausible poker without breaking the core guardrails.
 
-import { estimateBotEquity } from "./botEquity.js";
+import { estimateBotEquity, setBotEquityConfig } from "./botEquity.js";
 import { Card, Hand } from "./pokersolver.js";
 import { getPlayerActionState } from "./shared/actionModel.js";
 
@@ -187,8 +187,11 @@ const RIVER_SPLIT_PROTECTED_PUBLIC_RANK_MIN = 5;
 
 const botActionQueue = [];
 let processingBotActions = false;
+let botActionExecuting = false;
 let botActionTimer = null;
+let botActionTimerDueAt = 0;
 let runtimeBotPlaybackFast = false;
+let botActionErrorHandler = null;
 
 function getBotActionDelay() {
 	if (SPEED_MODE) {
@@ -205,14 +208,18 @@ function getBotActionDelay() {
 ========================== */
 function scheduleBotQueue() {
 	if (
-		!processingBotActions || botActionQueue.length === 0 || botActionTimer
+		!processingBotActions || botActionQueue.length === 0 ||
+		botActionTimer !== null
 	) {
 		return;
 	}
+	const delay = getBotActionDelay();
+	botActionTimerDueAt = Date.now() + delay;
 	botActionTimer = setTimeout(() => {
 		botActionTimer = null;
+		botActionTimerDueAt = 0;
 		processBotQueue();
-	}, getBotActionDelay());
+	}, delay);
 }
 
 export function setBotPlaybackFast(enabled) {
@@ -220,9 +227,10 @@ export function setBotPlaybackFast(enabled) {
 	if (!processingBotActions || botActionQueue.length === 0) {
 		return;
 	}
-	if (botActionTimer) {
+	if (botActionTimer !== null) {
 		clearTimeout(botActionTimer);
 		botActionTimer = null;
+		botActionTimerDueAt = 0;
 	}
 	scheduleBotQueue();
 }
@@ -234,6 +242,18 @@ export function enqueueBotAction(fn) {
 		processingBotActions = true;
 	}
 	scheduleBotQueue();
+}
+
+// Drop queued bot actions from a previous game so a mid-action restart cannot
+// fire stale closures into fresh game state.
+export function clearBotActionQueue() {
+	botActionQueue.length = 0;
+	if (botActionTimer !== null) {
+		clearTimeout(botActionTimer);
+		botActionTimer = null;
+	}
+	botActionTimerDueAt = 0;
+	processingBotActions = false;
 }
 
 export function normalizeBotActionRequest(decision) {
@@ -259,6 +279,25 @@ export function normalizeBotActionRequest(decision) {
 	}
 }
 
+export function setBotActionErrorHandler(handler) {
+	botActionErrorHandler = typeof handler === "function" ? handler : null;
+}
+
+// True while a bot action is actually executing or has a live delay timer. A queue
+// entry whose timer is gone or long overdue is a lost action (the host watches it).
+export function isBotActionPending() {
+	if (botActionExecuting) {
+		return true;
+	}
+	if (botActionTimer === null) {
+		return false;
+	}
+	// A non-null handle past its due time means the callback never fired. Keep a
+	// generous grace window so background-tab timer throttling is not misread.
+	return botActionTimerDueAt === 0 ||
+		Date.now() - botActionTimerDueAt < 5000;
+}
+
 // Execute queued actions at fixed intervals
 function processBotQueue() {
 	if (botActionQueue.length === 0) {
@@ -266,7 +305,21 @@ function processBotQueue() {
 		return;
 	}
 	const fn = botActionQueue.shift();
-	fn();
+	botActionExecuting = true;
+	try {
+		fn();
+	} catch (error) {
+		// One bad turn must never lock the queue: without this catch processingBotActions
+		// stays true forever and every later bot turn is silently dropped.
+		console.error("[bot] queued action failed", error);
+		try {
+			botActionErrorHandler?.(error);
+		} catch (handlerError) {
+			console.error("[bot] action error handler failed", handlerError);
+		}
+	} finally {
+		botActionExecuting = false;
+	}
 	if (botActionQueue.length > 0) {
 		scheduleBotQueue();
 	} else {

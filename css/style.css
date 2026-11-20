@@ -38,7 +38,7 @@ body {
     padding: 0;
     color: var(--font-color);
     font-size: 100%;
-    font-family: 'Secular One', sans-serif;
+    font-family: 'Secular One', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
     /* Uses dynamic viewport height for better handling of mobile viewports */
     min-height: inherit;
     display: flex;
@@ -87,7 +87,7 @@ button {
     padding: 1.5vmin 3vmin;
     margin: 0 2vmin;
     font-size: 1em;
-    font-family: 'Secular One', sans-serif;
+    font-family: 'Secular One', 'Noto Sans SC', 'Microsoft YaHei', sans-serif;
     border-radius: 1vmin;
     cursor: pointer;
     box-shadow: var(--shadow);
@@ -152,51 +152,16 @@ button:disabled {
 }
 
 #start-button,
-#new-round-cancel-button,
+#replay-button,
+#cheat-button,
 #instructions-button,
 #fast-forward-button {
     width: auto;
 }
 
-#new-round-countdown-value {
-    display: inline-block;
-    min-width: 2ch;
-    text-align: left;
-    font-variant-numeric: tabular-nums;
-}
-
 .new-round-controls {
     display: inline-flex;
     align-items: center;
-}
-
-.new-round-controls.new-round-countdown-active {
-    margin: 0 2vmin;
-    border-radius: 1vmin;
-    box-shadow: var(--shadow);
-}
-
-#start-button.new-round-countdown-active {
-    margin: 0;
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-    box-shadow: none;
-}
-
-#new-round-cancel-button.new-round-countdown-active {
-    background-color: var(--blue-darker);
-    color: var(--yellow);
-    margin: 0;
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-    box-shadow: none;
-}
-
-#start-button.new-round-countdown-active:active,
-#new-round-cancel-button.new-round-countdown-active:active {
-    background-color: var(--blue);
-    box-shadow: none;
-    transform: none;
 }
 
 input[type=range] {
@@ -232,11 +197,13 @@ input[type=range]::-moz-range-thumb {
     box-shadow: var(--shadow);
 }
 
-input[type=range]:disabled {
+input[type=range]:disabled,
+#amount-input:disabled {
     opacity: 0.7;
 }
 
-output {
+output,
+#amount-input {
     width: 76px;
     text-align: center;
     background-color: var(--blue);
@@ -244,10 +211,13 @@ output {
     color: var(--yellow);
     border-radius: 999px;
     padding: 5px 1rem;
+    border: none;
+    font: inherit;
     font-size: 1em;
 }
 
-output.invalid {
+output.invalid,
+#amount-input.invalid {
     color: var(--invalid);
 }
 
@@ -261,7 +231,7 @@ GRID
 -------------------------------------------------------------------
 */
 main {
-    width: 100vw;
+    width: 100%;
     flex: 1;
     place-items: center;
     display: grid;
@@ -337,7 +307,7 @@ SINGLE VIEW
     flex-direction: column;
     justify-content: flex-start;
     min-height: 100dvh;
-    width: 100vw;
+    width: 100%;
     margin: 3vmin 3vmin 0 3vmin;
     max-width: 830px;
 }
@@ -634,6 +604,170 @@ OVERLAY
     overflow: auto;
 }
 
+.profile-panel {
+    width: min(900px, 96vw);
+    max-height: min(90vh, 1000px);
+}
+
+.profile-header h2 {
+    color: var(--font-color);
+    margin: 0;
+    font-size: 1.4rem;
+}
+
+.profile-header p {
+    margin: 0.35rem 0 0;
+    color: var(--blue-lightest);
+    font-size: 0.95rem;
+}
+
+.profile-content {
+    min-height: 0;
+    overflow: auto;
+}
+
+#profile-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+#profile-overlay h3 {
+    color: var(--font-color);
+    margin: 0 0 0.5rem;
+    font-size: 1.1rem;
+}
+
+#profile-overlay table {
+    width: 100%;
+    table-layout: fixed;
+}
+
+#profile-overlay :where(th, td) {
+    vertical-align: middle;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    color: var(--font-color);
+}
+
+#profile-overlay tr > th:first-child {
+    width: 30%;
+    font-size: 0.9rem;
+}
+
+#profile-overlay thead th {
+    vertical-align: top;
+    color: var(--blue-lightest);
+}
+
+#profile-overlay .period-detail {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: 0.85rem;
+    font-weight: normal;
+    line-height: 1.35;
+}
+
+#profile-overlay .metric-value {
+    font-variant-numeric: tabular-nums;
+}
+
+#profile-overlay .profile-help {
+    margin-top: 0.6rem;
+    font-size: 0.8rem;
+}
+
+#profile-overlay summary {
+    width: fit-content;
+    cursor: pointer;
+    color: var(--blue-lightest);
+}
+
+#profile-overlay dl {
+    margin: 0.75rem 0;
+}
+
+#profile-overlay dl div + div {
+    margin-top: 0.7rem;
+}
+
+#profile-overlay dt {
+    margin-bottom: 0.15rem;
+}
+
+#profile-overlay dd {
+    margin: 0;
+    color: var(--blue-lightest);
+    line-height: 1.45;
+}
+
+.profile-history {
+    margin-top: 1.5rem;
+}
+
+.profile-history p {
+    margin: 0;
+    color: var(--blue-lightest);
+    font-size: 0.9rem;
+}
+
+.history-chart {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 1rem;
+}
+
+.history-axis {
+    height: 80px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    color: var(--blue-lightest);
+    font-size: 0.85rem;
+}
+
+#profile-history-list {
+    display: grid;
+    grid-template-columns: repeat(var(--history-count), minmax(0, 1fr));
+    flex: 1;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.history-track {
+    position: relative;
+    height: 80px;
+    margin: 0 0.3rem 0.5rem;
+    background: linear-gradient(var(--blue-lighter), var(--blue-lighter)) center / 1px 100% no-repeat;
+}
+
+.history-marker {
+    position: absolute;
+    top: clamp(5px, var(--finish-position), calc(100% - 5px));
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--yellow);
+    transform: translate(-50%, -50%);
+}
+
+.history-place {
+    display: block;
+    text-align: center;
+    color: var(--font-color);
+    font-size: 0.85rem;
+}
+
+.profile-note {
+    margin-top: 1.25rem;
+    color: var(--blue-lightest);
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
 .log-list-wrap {
     overflow: auto;
     min-height: 0;
@@ -824,6 +958,12 @@ footer {
     gap: 0.75rem;
 }
 
+#credit .credit-note {
+    font-size: 0.75rem;
+    opacity: 0.65;
+    white-space: nowrap;
+}
+
 .version-button,
 .sound-toggle {
     width: auto;
@@ -889,7 +1029,7 @@ PLAYER
 }
 
 .seat h3:empty::before {
-    content: "Enter Name";
+    content: attr(data-placeholder);
 }
 
 .seat h3:focus::before {
@@ -1229,4 +1369,331 @@ MEDIA QUERIES
     .chips :where(.total, .bet) {
         min-width: 56px;
     }
+
+    #profile-overlay table th,
+    #profile-overlay table td {
+        padding: 0.5rem 0.25rem;
+    }
+
+    #profile-overlay .period-label,
+    #profile-overlay .metric-value {
+        font-size: 0.9rem;
+    }
+}
+
+/*
+-------------------------------------------------------------------
+CHEAT PANEL
+-------------------------------------------------------------------
+*/
+
+.cheat-panel {
+    width: min(720px, 96vw);
+}
+
+.cheat-content {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+.cheat-content h2,
+.cheat-content h3 {
+    margin: 0;
+}
+
+.cheat-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.cheat-section summary {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    list-style: none;
+}
+
+.cheat-section summary::-webkit-details-marker {
+    display: none;
+}
+
+.cheat-section summary::after {
+    content: "▾";
+    font-size: 0.75em;
+    color: var(--blue-lightest);
+    transition: transform 0.2s ease;
+}
+
+.cheat-section[open] summary::after {
+    transform: rotate(180deg);
+}
+
+.cheat-hover-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: fit-content;
+    cursor: pointer;
+}
+
+.cheat-hover-toggle {
+    margin: 0;
+    width: 0;
+    height: 0;
+    opacity: 0;
+}
+
+.cheat-hover-switch {
+    position: relative;
+    flex: none;
+    width: 2.25rem;
+    height: 1.25rem;
+    border: 1px solid hsla(0, 0%, 100%, 0.24);
+    border-radius: 999px;
+    background-color: var(--blue-darker);
+    transition: background-color 0.2s ease;
+}
+
+.cheat-hover-switch::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 0.125rem;
+    width: 0.875rem;
+    height: 0.875rem;
+    border-radius: 50%;
+    background-color: var(--blue-lightest);
+    transform: translateY(-50%);
+    transition: left 0.2s ease;
+}
+
+.cheat-hover-toggle:checked + .cheat-hover-switch {
+    border-color: var(--yellow);
+    background-color: var(--yellow);
+}
+
+.cheat-hover-toggle:checked + .cheat-hover-switch::before {
+    left: calc(100% - 1rem);
+    background-color: var(--blue-darker);
+}
+
+.cheat-hover-toggle:focus-visible + .cheat-hover-switch {
+    outline: 2px solid var(--blue-lightest);
+    outline-offset: 2px;
+}
+
+.cheat-peek,
+.cheat-change {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid hsla(0, 0%, 100%, 0.08);
+    border-radius: 1vmin;
+    background-color: var(--blue-darker);
+}
+
+.cheat-peek-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.cheat-peek-table {
+    color: var(--yellow);
+}
+
+.cheat-peek-cards,
+.cheat-current-cards {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    min-height: 4.5vmin;
+}
+
+.cheat-card-img {
+    height: 4.5vmin;
+    width: auto;
+    aspect-ratio: 5/7;
+    border-radius: 0.5vmin;
+    display: block;
+}
+
+.cheat-change-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.cheat-card-grid {
+    display: grid;
+    grid-template-columns: repeat(13, minmax(0, 1fr));
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.cheat-card {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+}
+
+.cheat-card .cheat-card-img {
+    height: auto;
+    width: 100%;
+    min-width: 0;
+    aspect-ratio: auto;
+}
+
+.cheat-card:disabled {
+    opacity: 0.25;
+    cursor: default;
+}
+
+.cheat-card.cheat-card-held:disabled {
+    opacity: 1;
+    cursor: default;
+}
+
+.cheat-card.cheat-card-held {
+    border-radius: 0.5vmin;
+    outline: 2px solid var(--blue-lightest);
+}
+
+.cheat-card.cheat-card-selected {
+    border-radius: 0.5vmin;
+    outline: 2px solid var(--yellow);
+}
+
+.cheat-current-card {
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    border-radius: 0.5vmin;
+    outline: 2px solid transparent;
+}
+
+.cheat-current-card:disabled {
+    cursor: default;
+}
+
+.cheat-current-card.cheat-current-selected {
+    outline-color: var(--yellow);
+}
+
+.cheat-current-card .cheat-card-img {
+    height: 6vmin;
+}
+.cheat-status {
+    margin: 0;
+    min-height: 1em;
+}
+
+.cheat-status-error {
+    color: var(--invalid);
+}
+
+/*
+-------------------------------------------------------------------
+SCROLLBARS
+-------------------------------------------------------------------
+*/
+
+html {
+    scrollbar-width: thin;
+    scrollbar-color: var(--blue-lighter) var(--blue-darker);
+}
+
+.overlay-panel,
+.instructions-content,
+.stats-table-wrap,
+.log-list-wrap,
+.version-list-wrap,
+.cheat-content {
+    scrollbar-width: thin;
+    scrollbar-color: var(--blue-lighter) var(--blue-darker);
+}
+
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+::-webkit-scrollbar-track {
+    background-color: var(--blue-darker);
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: var(--blue-lighter);
+    border: 3px solid var(--blue-darker);
+    border-radius: 7px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background-color: var(--blue-lightest);
+}
+
+::-webkit-scrollbar-thumb:active {
+    background-color: var(--yellow);
+}
+
+::-webkit-scrollbar-corner {
+    background-color: var(--blue-darker);
+}
+
+/*
+-------------------------------------------------------------------
+CHEAT FLASHLIGHT PEEK
+-------------------------------------------------------------------
+*/
+
+
+/*
+A single face layer per hidden card. The layer is always fully painted; a
+feathered radial mask cuts a torch hole at --mx/--my so the card back below
+stays visible everywhere else. Only the two variables move while hovering,
+and the transition is opacity-only on purpose: an inherited `all 0.3s` turns
+every mask update into a discrete 0.3s interpolation (flicker + sway).
+*/
+main .seat .hole-cards .cheat-card-torch {
+    --mx: -200px;
+    --my: -200px;
+    --torch-core: clamp(30px, 4vmin, 70px);
+    --torch-edge: clamp(62px, 8.5vmin, 140px);
+    position: absolute;
+    z-index: 3;
+    pointer-events: none;
+    border-radius: 1vmin;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    opacity: 0;
+    transition: opacity 160ms ease;
+    -webkit-mask-image: radial-gradient(
+        circle var(--torch-edge) at var(--mx) var(--my),
+        rgba(0, 0, 0, 1) 0,
+        rgba(0, 0, 0, 1) var(--torch-core),
+        rgba(0, 0, 0, 0) var(--torch-edge)
+    );
+    mask-image: radial-gradient(
+        circle var(--torch-edge) at var(--mx) var(--my),
+        rgba(0, 0, 0, 1) 0,
+        rgba(0, 0, 0, 1) var(--torch-core),
+        rgba(0, 0, 0, 0) var(--torch-edge)
+    );
+}
+
+main .seat .hole-cards.cheat-hand-hovering .cheat-card-torch {
+    opacity: 1;
 }

@@ -1,3 +1,4 @@
+import { t } from "./i18n.js";
 import { Hand } from "./pokersolver.js";
 import { getPlayerActionState } from "./shared/actionModel.js";
 
@@ -375,6 +376,9 @@ function buildShowdownStatsPatch(player, showdownResult) {
 	}
 	if (isWinner) {
 		patch.handsWon = player.stats.handsWon + 1;
+		if (player.spotState?.sawFlop) {
+			patch.handsWonAfterFlop = (player.stats.handsWonAfterFlop ?? 0) + 1;
+		}
 		if (showdownResult.hadShowdown) {
 			patch.showdownsWon = player.stats.showdownsWon + 1;
 		}
@@ -424,9 +428,7 @@ export function createShowdownCommitPlan(gameState, showdownResult) {
 			pot: 0,
 		},
 		transferQueue: showdownResult.transferQueue.slice(),
-		revealPlayers: showdownResult.hadShowdown
-			? showdownResult.activePlayers.slice()
-			: [],
+		revealPlayers: showdownResult.hadShowdown ? showdownResult.activePlayers.slice() : [],
 		mainPotWinners: showdownResult.mainPotWinners.slice(),
 		winningPlayers: showdownResult.winningPlayers.slice(),
 	};
@@ -466,6 +468,28 @@ export function isAllInRunout(players, currentBet) {
 		return true;
 	}
 	return actionablePlayers[0].roundBet === currentBet;
+}
+
+export function getPlayerStatsRates(stats) {
+	return {
+		flopSeenPct: stats.hands > 0 ? stats.flopsSeen / stats.hands * 100 : null,
+		wtsdPct: stats.flopsSeen > 0 ? stats.showdowns / stats.flopsSeen * 100 : null,
+		aggressionFactor: stats.calls > 0 ? stats.aggressiveActs / stats.calls : null,
+	};
+}
+
+export function getPlayerTournamentPlacement(players, player) {
+	if (!player || !players.includes(player)) {
+		return null;
+	}
+	const remainingPlayers = players.filter((currentPlayer) => currentPlayer.chips > 0);
+	if (player.chips > 0) {
+		return remainingPlayers.length === 1 ? 1 : null;
+	}
+	// A busted player committed their entire starting stack, including blinds, to this hand.
+	const largerBustedStacks =
+		players.filter((currentPlayer) => currentPlayer.chips === 0 && currentPlayer.totalBet > player.totalBet).length;
+	return remainingPlayers.length + largerBustedStacks + 1;
 }
 
 function buildEmptyTurnActionResolution(action, amount, actionMeta = {}) {
@@ -668,6 +692,7 @@ export function createPlayerSpotState() {
 		voluntaryThisStreet: false,
 		aggressiveThisStreet: false,
 		enteredPreflop: false,
+		sawFlop: false,
 	};
 }
 
@@ -727,12 +752,11 @@ export function recordPlayerActionStats(gameState, player, actionName, actionMet
 			handContext.streetAggressiveActionCounts = createHandContextState().streetAggressiveActionCounts;
 		}
 		if (actionName === "check") {
-			handContext.streetCheckCounts[phase] =
-				(handContext.streetCheckCounts[phase] ?? 0) + 1;
+			handContext.streetCheckCounts[phase] = (handContext.streetCheckCounts[phase] ?? 0) + 1;
 		}
 		if (isAggressiveAction) {
-			handContext.streetAggressiveActionCounts[phase] =
-				(handContext.streetAggressiveActionCounts[phase] ?? 0) + 1;
+			handContext.streetAggressiveActionCounts[phase] = (handContext.streetAggressiveActionCounts[phase] ?? 0) +
+				1;
 		}
 	}
 	if (gameState.currentPhaseIndex === 0 && isVoluntaryAction) {
@@ -860,28 +884,28 @@ export function getShortHandStrengthLabel(solvedHand) {
 		return "";
 	}
 	if (solvedHand.descr === "Royal Flush") {
-		return "Royal flush";
+		return t("hand.royalFlush");
 	}
 	switch (solvedHand.name) {
 		case "Straight Flush":
-			return "Straight flush";
+			return t("hand.straightFlush");
 		case "Four of a Kind":
-			return "4 of a kind";
+			return t("hand.fourOfAKind");
 		case "Full House":
-			return "Full house";
+			return t("hand.fullHouse");
 		case "Flush":
-			return "Flush";
+			return t("hand.flush");
 		case "Straight":
-			return "Straight";
+			return t("hand.straight");
 		case "Three of a Kind":
-			return "3 of a kind";
+			return t("hand.threeOfAKind");
 		case "Two Pair":
-			return "2 Pair";
+			return t("hand.twoPair");
 		case "Pair":
-			return "Pair";
+			return t("hand.pair");
 		case "High Card":
 		default:
-			return "High card";
+			return t("hand.highCard");
 	}
 }
 
@@ -924,9 +948,7 @@ export function getBotRevealDecision(player, communityCards, randomValue = Math.
 		const rank = cardCode[0];
 		rankCounts.set(rank, (rankCounts.get(rank) || 0) + 1);
 	});
-	const madeRankEntry = Array.from(rankCounts.entries()).find(([, count]) =>
-		count === repeatedCount
-	);
+	const madeRankEntry = Array.from(rankCounts.entries()).find(([, count]) => count === repeatedCount);
 	if (!madeRankEntry) {
 		return null;
 	}
@@ -1770,9 +1792,30 @@ export function dealCommunityCardsForPhase(gameState, amount, maxCommunityCards 
 		}
 	}
 
+	// Reaching the flop is a long-term stat: everyone still in the hand has "seen" it.
+	const playerPatches = [];
+	if (gameState.communityCards.length === 0 && dealtCards.length === 3) {
+		gameState.players.forEach((player) => {
+			if (player.folded) {
+				return;
+			}
+			const patch = {
+				spotState: {
+					...(player.spotState ?? createPlayerSpotState()),
+					sawFlop: true,
+				},
+			};
+			if (player.stats) {
+				patch.stats = { ...player.stats, flopsSeen: (player.stats.flopsSeen ?? 0) + 1 };
+			}
+			playerPatches.push({ player, patch });
+		});
+	}
+
 	return {
 		burnedCard,
 		dealtCards,
+		playerPatches,
 		gameStatePatch: {
 			deck,
 			cardGraveyard,

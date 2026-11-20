@@ -5,6 +5,11 @@
 A browser-based poker table for Texas Hold'em. Play solo against bots or with friends. Each player
 joins via QR code or link to use their own device, while the shared table handles the rest.
 
+> **Unofficial modified version.** This repository is a personal, non-commercial modification of
+> [Poker by Tehes](https://github.com/Tehes/poker): Chinese/English UI, single-player and bot
+> changes, and an experimental AI-agent server. It is not the original project and is not
+> affiliated with or endorsed by the original author.
+
 ---
 
 ## License and usage

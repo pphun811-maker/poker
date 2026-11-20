@@ -74,6 +74,15 @@ class AgentPokerClient:
     def history(self, game_id, token):
         return self._request("GET", f"/games/{game_id}/history?token={token}")
 
+    def insights(self, game_id, token, samples=None):
+        query = f"token={token}"
+        if samples is not None:
+            query += f"&samples={samples}"
+        return self._request("GET", f"/games/{game_id}/insights?{query}")
+
+    def report(self, game_id, token):
+        return self._request("GET", f"/games/{game_id}/report?token={token}")
+
 
 def agent_hole_cards(state):
     agent_seat = state.get("agentSeatIndex", 0)
