@@ -85,6 +85,7 @@ import {
 } from "./shared/tableViewRenderer.js";
 import { initServiceWorker } from "./serviceWorkerRegistration.js";
 import { initCheatPanel, refreshCheatPanel } from "./cheatPanel.js";
+import { appendSyncParam, getSyncEndpoints, rememberSyncBaseUrl } from "./syncConfig.js";
 import { APP_VERSION, VERSION_LOG } from "./version.js";
 
 /* --------------------------------------------------------------------------------------------------
@@ -256,9 +257,15 @@ if (SPEED_MODE) {
 	DEBUG_FLOW = true;
 }
 
-const STATE_SYNC_ENDPOINT = "https://poker.tehes.deno.net/state";
-const ACTION_SYNC_ENDPOINT = "https://poker.tehes.deno.net/action";
+rememberSyncBaseUrl();
+const syncEndpoints = getSyncEndpoints();
 let tableId = null;
+let syncHostToken = null;
+let syncSeatTokens = new Map();
+let lastSyncedViewJson = null;
+const SYNC_HOST_TOKEN_KEY_PREFIX = "poker:sync-host-token:";
+const SYNC_SEAT_TOKENS_KEY_PREFIX = "poker:sync-seat-tokens:";
+const SYNC_TOKEN_PATTERN = /^[A-Za-z0-9_-]{12,128}$/;
 const STATE_SYNC_DELAY = 750;
 const ACTION_POLL_INTERVAL = 1000;
 let stateSyncTimer = null;
@@ -1250,15 +1257,21 @@ function showPlayerQr(player, card1, card2) {
 		return;
 	}
 
+	const seatToken = getSeatSyncToken(player.seatIndex);
+	const hasLiveSeat = tableId !== null && seatToken !== "";
 	seatRef.qrContainer.classList.remove("hidden");
 	const holeCardsUrl = createPageUrl("hole-cards.html");
-	holeCardsUrl.searchParams.set("card1", card1);
-	holeCardsUrl.searchParams.set("card2", card2);
 	holeCardsUrl.searchParams.set("name", player.name);
 	holeCardsUrl.searchParams.set("chips", `${player.chips}`);
 	holeCardsUrl.searchParams.set("seatIndex", `${player.seatIndex}`);
-	if (tableId !== null) {
+	if (hasLiveSeat) {
+		// The live view gets the cards from the relay, so the URL does not need to carry them.
 		holeCardsUrl.searchParams.set("tableId", tableId);
+		holeCardsUrl.searchParams.set("token", seatToken);
+		appendSyncParam(holeCardsUrl);
+	} else {
+		holeCardsUrl.searchParams.set("card1", card1);
+		holeCardsUrl.searchParams.set("card2", card2);
 	}
 	holeCardsUrl.searchParams.set("t", `${Date.now()}`);
 	const url = holeCardsUrl.toString();
@@ -1272,10 +1285,12 @@ function showPlayerQr(player, card1, card2) {
 		radius: 0,
 	}, seatRef.qrLink);
 
-	if (tableId !== null) {
+	if (hasLiveSeat) {
 		const remoteTableUrl = createPageUrl("remoteTable.html");
 		remoteTableUrl.searchParams.set("tableId", tableId);
 		remoteTableUrl.searchParams.set("seatIndex", `${player.seatIndex}`);
+		remoteTableUrl.searchParams.set("token", seatToken);
+		appendSyncParam(remoteTableUrl);
 		seatRef.remoteLink.href = remoteTableUrl.toString();
 		seatRef.remoteLink.classList.remove("hidden");
 	} else {
@@ -1832,7 +1847,7 @@ function registerBotReveal(player) {
 }
 
 function hasStateSyncEnabled() {
-	return tableId !== null;
+	return tableId !== null && Boolean(syncEndpoints.state && syncEndpoints.action);
 }
 
 function getHumanPlayerCount(players = gameState.players) {
@@ -1840,7 +1855,7 @@ function getHumanPlayerCount(players = gameState.players) {
 }
 
 function shouldEnableStateSyncForGame() {
-	return getHumanPlayerCount() >= 2;
+	return getHumanPlayerCount() >= 2 && Boolean(syncEndpoints.state && syncEndpoints.action);
 }
 
 function syncTableUrlWithState() {
@@ -1853,16 +1868,96 @@ function syncTableUrlWithState() {
 	globalThis.history.replaceState(null, "", tableUrl.toString());
 }
 
+function createSyncToken() {
+	const bytes = new Uint8Array(18);
+	crypto.getRandomValues(bytes);
+	return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function readStoredJson(key) {
+	try {
+		const raw = globalThis.localStorage?.getItem(key);
+		return raw ? JSON.parse(raw) : null;
+	} catch {
+		return null;
+	}
+}
+
+function writeStoredJson(key, value) {
+	try {
+		globalThis.localStorage?.setItem(key, JSON.stringify(value));
+	} catch {
+		// Private browsing can reject writes; the in-memory copy still works for this session.
+	}
+}
+
+function getOrCreateSyncHostToken(tableIdValue) {
+	const key = `${SYNC_HOST_TOKEN_KEY_PREFIX}${tableIdValue}`;
+	let stored = null;
+	try {
+		stored = globalThis.localStorage?.getItem(key) ?? null;
+	} catch {
+		stored = null;
+	}
+	if (typeof stored === "string" && SYNC_TOKEN_PATTERN.test(stored)) {
+		return stored;
+	}
+	const token = createSyncToken();
+	try {
+		globalThis.localStorage?.setItem(key, token);
+	} catch {
+		// Keep the freshly generated token in memory only.
+	}
+	return token;
+}
+
+function getOrCreateSyncSeatTokens(tableIdValue, seatIndexes) {
+	const key = `${SYNC_SEAT_TOKENS_KEY_PREFIX}${tableIdValue}`;
+	const stored = readStoredJson(key);
+	const tokens = new Map();
+	const serialized = {};
+	for (const seatIndex of seatIndexes) {
+		const storedToken = stored?.[seatIndex];
+		const token = typeof storedToken === "string" && SYNC_TOKEN_PATTERN.test(storedToken)
+			? storedToken
+			: createSyncToken();
+		tokens.set(seatIndex, token);
+		serialized[seatIndex] = token;
+	}
+	writeStoredJson(key, serialized);
+	return tokens;
+}
+
+function getSeatSyncToken(seatIndex) {
+	return syncSeatTokens.get(seatIndex) ?? "";
+}
+
+function resetStateSyncRuntime() {
+	tableId = null;
+	syncHostToken = null;
+	syncSeatTokens.clear();
+	lastSyncedViewJson = null;
+}
+
 function initStateSyncForGame() {
+	lastSyncedViewJson = null;
 	if (!shouldEnableStateSyncForGame()) {
-		tableId = null;
+		resetStateSyncRuntime();
 		syncTableUrlWithState();
+		if (getHumanPlayerCount() >= 2) {
+			enqueueNotification(t("sync.notConfigured"));
+		}
 		return;
 	}
 
 	const tableUrl = new URL(globalThis.location.href);
 	tableId = tableUrl.searchParams.get("tableId") ||
-		Math.random().toString(36).slice(2, 8);
+		Math.random().toString(36).slice(2, 10);
+	syncHostToken = getOrCreateSyncHostToken(tableId);
+	syncSeatTokens = getOrCreateSyncSeatTokens(
+		tableId,
+		getHumanPlayers().map((player) => player.seatIndex),
+	);
 	syncTableUrlWithState();
 }
 
@@ -1908,14 +2003,15 @@ function clearPendingAction() {
 }
 
 async function fetchPendingRemoteAction(turnToken) {
-	if (!hasStateSyncEnabled() || !turnToken) {
+	if (!hasStateSyncEnabled() || !turnToken || !syncHostToken) {
 		return null;
 	}
 
 	try {
-		const url = `${ACTION_SYNC_ENDPOINT}?tableId=${encodeURIComponent(tableId)}&turnToken=${
-			encodeURIComponent(turnToken)
-		}`;
+		const url = new URL(syncEndpoints.action);
+		url.searchParams.set("tableId", tableId);
+		url.searchParams.set("turnToken", turnToken);
+		url.searchParams.set("hostToken", syncHostToken);
 		const res = await fetch(url, {
 			cache: "no-store",
 		});
@@ -1934,13 +2030,37 @@ async function fetchPendingRemoteAction(turnToken) {
 }
 
 async function sendTableState() {
+	if (!hasStateSyncEnabled() || !syncHostToken) {
+		return;
+	}
+
+	const humanSeats = getHumanPlayers()
+		.map((player) => ({
+			seatIndex: player.seatIndex,
+			token: getSeatSyncToken(player.seatIndex),
+		}))
+		.filter((seat) => Boolean(seat.token));
+	if (humanSeats.length === 0) {
+		return;
+	}
+	const humanIndexes = new Set(humanSeats.map((seat) => seat.seatIndex));
+	const view = buildSyncView(gameState, notifArr.slice(0, MAX_ITEMS));
+	// Only human seats need private projections. Keeping bot seat views out of the payload limits
+	// what the relay stores and makes sure a seat token can never address a bot.
+	view.seatViews = view.seatViews.filter((seatView) => humanIndexes.has(seatView.seatIndex));
+	const viewJson = JSON.stringify(view);
+	if (viewJson === lastSyncedViewJson) {
+		return;
+	}
 	const payload = {
-		tableId: tableId,
-		view: buildSyncView(gameState, notifArr.slice(0, MAX_ITEMS)),
+		tableId,
+		hostToken: syncHostToken,
+		humanSeats,
+		view,
 	};
 
 	try {
-		const res = await fetch(STATE_SYNC_ENDPOINT, {
+		const res = await fetch(syncEndpoints.state, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(payload),
@@ -1948,8 +2068,10 @@ async function sendTableState() {
 		if (!res.ok) {
 			throw new Error(`state sync failed with status ${res.status}`);
 		}
+		lastSyncedViewJson = viewJson;
 	} catch (error) {
 		logFlow("state sync failed", error);
+		lastSyncedViewJson = null;
 		queueStateSync();
 	}
 }
@@ -4264,7 +4386,7 @@ poker.init();
  * - AUTO_RELOAD_ON_SW_UPDATE: reload page once after an update
  -------------------------------------------------------------------------------------------------- */
 const USE_SERVICE_WORKER = false;
-const SERVICE_WORKER_VERSION = "2026-11-17-v5";
+const SERVICE_WORKER_VERSION = "2026-11-21-v6";
 const AUTO_RELOAD_ON_SW_UPDATE = true;
 
 initServiceWorker({

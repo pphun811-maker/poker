@@ -474,3 +474,17 @@ registerStrings("cheat", {
 	swapped: { zh: "已将 {old} 换成 {new}。", en: "Swapped {old} for {new}." },
 	set: { zh: "手牌已换为 {cards}。", en: "Cards set to {cards}." },
 });
+
+registerStrings("sync", {
+	waiting: { zh: "等待牌桌更新…", en: "Waiting for updates…" },
+	loading: { zh: "正在载入牌桌…", en: "Loading table…" },
+	connectionLost: { zh: "与联机服务器断开，正在重试…", en: "Connection lost, retrying…" },
+	tableUnavailable: { zh: "牌桌不可用。", en: "Table unavailable." },
+	seatUnavailable: { zh: "该座位暂不可用。", en: "Seat unavailable." },
+	missingLink: { zh: "入座链接不完整或已失效。", en: "This seat link is incomplete or no longer valid." },
+	actionFailed: { zh: "操作发送失败，请重试。", en: "Action failed, please try again." },
+	notConfigured: {
+		zh: "联机服务未配置，远程入座不可用。",
+		en: "Online sync is not configured, so remote seats are unavailable.",
+	},
+});

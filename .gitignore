@@ -2,3 +2,5 @@ tmp/
 __pycache__/
 .zcode-site/
 .zcode-site.json
+.deno-kv/
+.deno-kv*

@@ -10,9 +10,21 @@ Version log writing guide:
 - Add optional contributor credits as dedicated metadata instead of release notes.
 */
 
-export const APP_VERSION = "1.6.0";
+export const APP_VERSION = "1.7.0";
 
 export const VERSION_LOG = [
+	{
+		version: "1.7.0",
+		date: "2026-11-21",
+		title: "Online seats for friends",
+		notes: [
+			"Multiplayer tables can now run over the internet: the host device keeps the game, and each human seat opens its own private link on another device.",
+			"Every seat link carries its own access token, so one player cannot read another player's hole cards by changing the seat number.",
+			"Remote actions are sent back to the host table, and each device can switch between the companion card view and the full table view.",
+			"Included a one-file relay with free-hosting setup notes; solo and offline play are unchanged.",
+		],
+		estimated: false,
+	},
 	{
 		version: "1.6.0",
 		date: "2026-11-19",

@@ -24,6 +24,8 @@ import {
 } from "./shared/humanTurnController.js";
 import { getSeatView, getTableView } from "./shared/syncViewModel.js";
 import { initSound, initSoundButton, playTurnChime } from "./shared/sound.js";
+import { getSyncEndpoints, rememberSyncBaseUrl } from "./syncConfig.js";
+import { t } from "./i18n.js";
 
 /* --------------------------------------------------------------------------------------------------
 Variables
@@ -51,8 +53,9 @@ const soundButton = document.getElementById("sound-button");
 const onlineOnlyElements = [betEl, potEl, singleActionPanelEl];
 const urlParams = new URLSearchParams(globalThis.location.search);
 const tableId = urlParams.get("tableId") || "";
-const STATE_ENDPOINT = "https://poker.tehes.deno.net/state";
-const ACTION_ENDPOINT = "https://poker.tehes.deno.net/action";
+const seatToken = urlParams.get("token") || "";
+rememberSyncBaseUrl();
+const syncEndpoints = getSyncEndpoints();
 const REFRESH_INTERVAL = 750;
 const ACTION_STEP = 10;
 let lastVersion = 0;
@@ -83,7 +86,8 @@ const seatIndexParam = initialViewState.seatIndex;
 const actionControls = createSeatActionControls({
 	tableId,
 	seatIndex: seatIndexParam,
-	actionEndpoint: ACTION_ENDPOINT,
+	seatToken,
+	actionEndpoint: syncEndpoints.action,
 	actionStep: ACTION_STEP,
 	visibleElements: [
 		singleFoldButton,
@@ -96,6 +100,7 @@ const actionControls = createSeatActionControls({
 	amountInput: singleSliderOutput,
 	decrementButton: singleAmountDecrementButton,
 	incrementButton: singleAmountIncrementButton,
+	onActionError: () => renderNotifications([t("sync.actionFailed")]),
 	onNewTurn: () => playTurnChime(),
 });
 
@@ -109,13 +114,23 @@ function init() {
 	document.addEventListener("touchstart", function () {}, false);
 	document.addEventListener("visibilitychange", handleVisibilityChange);
 	actionControls.init();
-	configureViewSwitchLink(singleSwitchLink, "remoteTable.html", tableId, seatIndexParam);
+	configureViewSwitchLink(singleSwitchLink, "remoteTable.html", tableId, seatIndexParam, {
+		sync: syncEndpoints.base,
+		token: seatToken,
+	});
 	clearSyncedDisplays();
 	applyParams();
 	consumeLaunchParams();
-	if (!tableId || seatIndexParam === null) {
+	if (!syncEndpoints.state) {
 		setOnlineElementsVisible(false);
 		actionControls.hide();
+		renderNotifications([t("sync.notConfigured")]);
+		return;
+	}
+	if (!tableId || seatIndexParam === null || !seatToken) {
+		setOnlineElementsVisible(false);
+		actionControls.hide();
+		renderNotifications([t("sync.missingLink")]);
 		return;
 	}
 	pollState();
@@ -217,16 +232,19 @@ function renderWinProbability(value, shouldShow) {
 // Poker tables have bursty activity; 204 does not imply inactivity ahead.
 async function pollState() {
 	if (
-		!tableId || seatIndexParam === null || isPolling || document.visibilityState !== "visible"
+		!tableId || seatIndexParam === null || !seatToken || !syncEndpoints.state ||
+		isPolling || document.visibilityState !== "visible"
 	) {
 		return;
 	}
 	isPolling = true;
 	try {
-		const url = `${STATE_ENDPOINT}?tableId=${
-			encodeURIComponent(tableId)
-		}&seatIndex=${seatIndexParam}&sinceVersion=${lastVersion}`;
-		const res = await fetch(url);
+		const url = new URL(syncEndpoints.state);
+		url.searchParams.set("tableId", tableId);
+		url.searchParams.set("seatIndex", `${seatIndexParam}`);
+		url.searchParams.set("token", seatToken);
+		url.searchParams.set("sinceVersion", `${lastVersion}`);
+		const res = await fetch(url, { cache: "no-store" });
 		if (res.status === 204) {
 			setOnlineElementsVisible(hasSyncedState);
 			return;
@@ -237,10 +255,16 @@ async function pollState() {
 			setOnlineElementsVisible(applyRemoteState(payload));
 		} else {
 			setOnlineElementsVisible(false);
+			if (res.status === 404) {
+				// A restarted host can reuse the table id with a fresh version counter.
+				lastVersion = 0;
+			}
+			renderNotifications([t("sync.tableUnavailable")]);
 		}
 	} catch (error) {
 		console.warn("state fetch failed", error);
 		setOnlineElementsVisible(false);
+		renderNotifications([t("sync.connectionLost")]);
 	} finally {
 		isPolling = false;
 		schedulePoll();

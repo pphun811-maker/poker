@@ -1,0 +1,17 @@
+# Render Blueprint for the multiplayer relay.
+# New Render user: Blueprints -> New Blueprint Instance -> connect this repo.
+# The service is free, sleeps after ~15 minutes without traffic, and keeps table state in memory.
+services:
+  - type: web
+    name: poker-sync
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: SYNC_STORAGE
+        value: memory
+      - key: ALLOWED_ORIGINS
+        value: https://pphun811-maker.github.io

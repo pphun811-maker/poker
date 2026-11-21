@@ -6,6 +6,9 @@
 		"singleQuote": false,
 		"semiColons": true
 	},
+	"unstable": [
+		"kv"
+	],
 	"tasks": {
 		"engine:batch": "deno run --allow-read=. --allow-write=.,/tmp ./scripts/engineBatch.js",
 		"engine:batch:equity": "deno run --allow-read=. --allow-write=.,/tmp ./scripts/engineBatch.js --equity",
@@ -14,6 +17,8 @@
 		"agent-api": "deno run --allow-net --allow-read=. ./server/main.js",
 		"agent-api:test": "deno test server/insights.test.js",
 		"agent-api:build": "deno compile --allow-net --include ./server/watch.html --include ./server/agentWorker.js --include ./css --include ./cards --include ./icons --output \"../../Texas Player/agent-poker-api.exe\" ./server/main.js",
+		"sync": "deno run --allow-net --allow-env --allow-read=. --allow-write=. ./server/sync.js --port=8787",
+		"sync:test": "deno test server/sync.test.js",
 		"speedmode": "deno run --allow-env=CHROME_BIN --allow-net=127.0.0.1,localhost --allow-read=. --allow-write=.,/tmp --allow-run ./scripts/speedmodeBatch.js",
 		"speedmode:10": "deno run --allow-env=CHROME_BIN --allow-net=127.0.0.1,localhost --allow-read=. --allow-write=.,/tmp --allow-run ./scripts/speedmodeBatch.js --runs=10",
 		"speedmode:30": "deno run --allow-env=CHROME_BIN --allow-net=127.0.0.1,localhost --allow-read=. --allow-write=.,/tmp --allow-run ./scripts/speedmodeBatch.js --runs=30",

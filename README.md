@@ -82,7 +82,8 @@ The same table supports different ways to play. The mode depends only on how man
   table becomes a self-running poker show.
 - **Multiplayer**: Two or more humans join. They can play in the same room or anywhere in the world.
   Players can join on their own devices via QR code or link while the shared table remains the
-  central board.
+  central board. Online play uses the small relay described below; the host device keeps the game
+  running and must stay open.
 - **Hybrid Tables**: Humans and bots can mix freely. This makes it easy to run short-handed games,
   fill gaps, or teach new players without slowing the table down.
 
@@ -91,13 +92,14 @@ The same table supports different ways to play. The mode depends only on how man
 ## 🚀 Getting Started
 
 1. Open this URL on a shared device (e.g., tablet or laptop): 👉
-   [https://tehes.github.io/poker](https://tehes.github.io/poker)
+   [https://pphun811-maker.github.io/poker/](https://pphun811-maker.github.io/poker/)
 
 2. Add players by typing their names.
 
 3. Start the game.
 
-4. Human players can then join on their own devices via QR code or direct link.
+4. Human players can then join on their own devices via QR code or direct link. For remote friends,
+   share the per-seat link after the first hand is dealt.
 
 The table handles dealing, blinds, betting, and showdown automatically.
 
@@ -115,8 +117,8 @@ The table works fully offline after the first complete load.
   are loaded and cached on demand.
 - **Updates** – A new version is fetched and activated in the background; refreshing the page loads
   the updated assets.
-- **Graceful QR Fallback** – If sync is unavailable, the QR code can still carry embedded hole-card
-  data so the companion view remains usable in read-only mode.
+- **Graceful QR Fallback** – In solo/local play the QR code can carry embedded hole-card data so the
+  companion view remains usable without a relay. Online seats rely on the relay instead.
 
 ---
 
@@ -128,25 +130,106 @@ The table works fully offline after the first complete load.
 - **Deno batch runners** – browserless engine batches for fast bot/engine validation, plus browser
   speedmode batches for end-to-end integration checks
 - **Service Worker caching** – supports offline play after the first load
-- **Optional Deno backend sync** – keeps multiplayer companion views and remote actions in sync
+- **Optional Deno relay** – one small file (`server/sync.js`) keeps multiplayer remote seats and
+  actions in sync; deploy it to Deno Deploy or run it locally
 - **qr-creator** – QR code generation for device joining
 - **pokersolver** – hand evaluation at showdown
 
 ---
 
-## 🌐 Optional Backend Sync
+## 🌐 Online Multiplayer Relay
 
-Backend sync is used only in multiplayer games that start with at least 2 human players.
+GitHub Pages only serves static files, so online seats need one small relay. The relay lives in
+`server/sync.js` as a single Deno file; GitHub Pages keeps hosting the client.
 
+- **Host-authoritative**: the shared device runs the game engine. The relay stores the latest public
+  table plus one private projection per human seat and hands remote actions back to the host.
+- **Per-seat privacy**: every human seat gets a random token. A seat token can only read its own
+  projection, so changing `seatIndex` in a URL cannot reveal another player's hole cards. Bot seats
+  are never uploaded.
+- **Host token**: state writes require the host token, so a guest cannot overwrite the table.
 - **Solo and spectator games stay local** and keep a clean URL without `tableId`.
-- **Solo saves are local-only**: unfinished Solo vs Bots games are stored in the browser on
-  the shared device; multiplayer sync does not create persistent cloud sessions.
+- **Solo saves are local-only**: unfinished Solo vs Bots games are stored in the browser on the
+  shared device; multiplayer sync does not create persistent cloud sessions.
 - **Human seats expose two entry points**: a QR code for the companion view (`hole-cards.html`) and
-  a direct link for the full remote table (`remoteTable.html`).
-- **Both views stay connected to the same seat** and can be switched at any time.
-- **Player actions from joined devices** are relayed back to the shared table.
-- **If the backend is unreachable**, the QR flow degrades gracefully to embedded hole-card data and
-  read-only companion access.
+  a direct link for the full remote table (`remoteTable.html`). Both carry the seat token and relay
+  URL, and can be switched at any time.
+- **If the relay is unreachable**, the remote pages show a connection message; actions stay on the
+  shared table.
+
+### Deployment (pick one host)
+
+The relay is one dependency-free Deno file. The included `Dockerfile` runs it on any Docker host,
+and `render.yaml` is a ready Render blueprint.
+
+**Option A — Render (recommended: free, no card, dashboard reachable from mainland networks)**
+
+1. Push this repo to GitHub.
+2. Open [Render](https://dashboard.render.com/) → **New** → **Blueprint** → connect the repo.
+   Render reads `render.yaml`, builds the `Dockerfile`, and starts the service.
+3. Copy the service URL, for example `https://poker-sync-xxxx.onrender.com`.
+4. Set it in `js/syncConfig.js`, or open the host site once with `?sync=<url>`; seat links copy it
+   to every guest device.
+
+Render's free web service sleeps after about 15 minutes without traffic and wakes in about a minute.
+Open `<url>/health` a minute before playing. Storage is in memory, so after a wake or restart start
+a new table.
+
+**Option B — Zeabur / Koyeb / Fly.io / your own VPS**
+
+Use the same `Dockerfile`, expose port `8000`, and set `SYNC_STORAGE=memory` plus
+`ALLOWED_ORIGINS=https://pphun811-maker.github.io`. Zeabur has an APAC free-credit tier; Koyeb and
+Fly.io have small free/cheap instances. No code changes are needed.
+
+**Option C — Deno Deploy (existing accounts only)**
+
+The Deno team joined Cloudflare and Deno Deploy is being sunset (apps run until around April 2027),
+so this is no longer the recommended path. If you already have it: connect the repo, set the
+entrypoint to `server/sync.js`, provision a **Deno KV** database, and assign it to the app. KV is
+needed because Deploy can run multiple instances; without it the relay is single-instance only.
+`/health` reports `"storage":"kv"` when KV is active.
+
+**Option D — Local relay + tunnel (no cloud account)**
+
+Run `deno task sync`, then expose it with a tunnel:
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8787
+```
+
+Use the printed HTTPS URL as `?sync=...`. The host PC must stay on, but there is no cold start and no
+quota. If `trycloudflare.com` is blocked for your friends, use a mainland-friendly tunnel (cpolar,
+NATAPP, 花生壳) or your own VPS.
+
+### Local development
+
+```bash
+deno task sync            # relay on http://127.0.0.1:8787
+python -m http.server 8000
+# open http://127.0.0.1:8000/?sync=http://127.0.0.1:8787
+```
+
+Use HTTP for both the page and the relay. A GitHub Pages HTTPS page cannot call an HTTP relay
+(mixed content).
+
+### Relay configuration
+
+- `ALLOWED_ORIGINS=https://your.site,https://other.site` overrides the CORS allowlist. It defaults to
+  `https://pphun811-maker.github.io` plus localhost.
+- Tables expire after 8 hours; a pending action expires after 15 minutes.
+- Free hosts differ: Render sleeps after inactivity; Zeabur/Koyeb may scale to zero. In-memory
+  storage resets on restart, so start a fresh table after a wake. A very long or very busy session
+  can still hit a host's request limits.
+- The relay sees the full table state, including hole cards, in memory/KV. It only serves one seat's
+  projection per token. Self-host `server/sync.js` if that trust model does not fit.
+- `deno task sync:test` covers projection, token isolation, actions, CORS, and cleanup.
+
+### Limitations
+
+- The host device must stay open; closing it ends the online table.
+- Guests join after the hand is dealt, from the per-seat link/QR shown on the host table.
+- The host browser is authoritative, so a technically savvy host can see all cards. This is the same
+  trust model as shared-table play.
 
 ---
 
@@ -313,11 +396,12 @@ deno task speedmode -- --out=tmp/poker-speedmode-latest
 
 ## 📋 Known Limitations
 
-- Live syncing is best-effort; if the backend is unreachable, joined devices fall back to read-only
-  companion access, and actions stay on the shared table.
+- Live syncing is best-effort; if the relay is unreachable, joined devices show a connection message
+  and actions stay on the shared table.
 - Saved games are local to the same browser/device and apply only to Solo vs Bots games.
-- Remote table links are lightweight and trust-based; there are no seat tokens or connection checks
-  yet.
+- Online play requires the host tab to stay open and a deployed relay; seat links are bearer
+  credentials, so share each one privately.
+- The host browser is the dealer and can see all cards; online play is meant for trusted groups.
 - The blind progression (formula-based increase every 6 hands) is not customizable.
 
 ---

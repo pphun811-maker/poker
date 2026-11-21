@@ -15,6 +15,7 @@
 
 | 提交 | 内容 | 验证 |
 |---|---|---|
+| （2026-11-21，未提交） | **人类版联机**：新增 `server/sync.js` 单文件中转（Deno Deploy / 本地均可，Deno KV + 内存回退），复用原 `/state`、`/action` 协议。客户端新增 `js/syncConfig.js`（`?sync=` → localStorage → `DEFAULT_SYNC_BASE_URL`），并给每个真人座位生成随机 token、房主生成 hostToken；`sendTableState` 只上传真人 `seatView`，服务端按 token 投影，换 `seatIndex` 拿不到别人的牌；入座链接携带 `tableId/seatIndex/token/sync`，切换 companion/remote 视图时保留；断线/未配置有中英提示。部署步骤见 README「Online Multiplayer Relay」和 `server/README.md` | `deno task sync:test` 9 绿；本地 Deno 中继 + 无头 Chrome 双客户端 E2E：Alice 只看到自己的 5S/4S、其余全暗；Alice token 查 Bob/Bot 座位均 403；伪造 hostToken POST 403；远端 Bob/Frank 点击「跟注」后房主 `activeSeatIndex` 前进、筹码/下注更新；入座链接不含 `card1/card2`（避免把牌写进 URL） |
 | `386b3df` | bot equity blend：postflop 决策闸门 = 0.6×真实蒙特卡洛 equity + 0.4×原手牌分类强度（`js/botEquity.js` + `EQUITY_BLEND_WEIGHT` in `js/bot.js`） | 100 局候选 + 双向 equity 审计 + 500 局确认：面对下注弃牌率 44.7%→28.7%（要求 31.9%），硬失败 0，冠军分布更均匀 |
 | `e3ad5c9` | `server/` 无头 agent API（HTTP 长轮询、无出牌倒计时、防泄牌投影、insights 端点、人类席位前身） | `python -I server/test_api.py` 全绿 |
 | `783f886` | shoveWarning（全下/大额跟注警告）+ prompt 硬化（每轮必调 insights） | 第一局实战暴露的问题：LLM 96 轮只查 9 次、K6o 裸跟全下 |
@@ -68,6 +69,12 @@ deno run ... ./scripts/engineBatch.js --bot-equity=on --equity --equity-limit=25
 deno task agent-api
 # 部署版 exe（E:\Texas Player\agent-poker-api.exe，改代码后要重编）
 deno task agent-api:build
+
+# 人类版联机中转（本地）
+deno task sync                 # http://127.0.0.1:8787
+python -m http.server 8000
+# 浏览器打开 http://127.0.0.1:8000/?sync=http://127.0.0.1:8787
+deno task sync:test            # 投影/token/action/CORS 测试
 ```
 
 人类单挑开局：`POST /games {"agentName":"...","botCount":0,"humanSeat":true,"humanName":"...","startingChips":2000}`，返回的 `humanSeatToken` 拼进 `/watch?game=…&token=…` 就是带操作条的席位页。

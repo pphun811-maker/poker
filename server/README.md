@@ -280,3 +280,74 @@ deno test --allow-read=. js/       # 原版引擎 + bot equity 测试（70 绿�
 
 把 [`server/AGENT_PROMPT.md`](./AGENT_PROMPT.md) 里整段 prompt 复制给任何能执行 shell / HTTP 请求的 Agent
 即可，它会自己读文档、开局、打到冠军并汇报结果。
+
+---
+
+## 联机中转服务（`server/sync.js`）
+
+浏览器版「人类联机」只需要一个很薄的中转服务，和上面的 Agent API **互相独立**：游戏引擎仍然跑在房主浏览器里，中转只负责保存最新公开牌桌、给每个真人座位下发自己的私有视角、把远端操作递回房主。
+
+### 本地启动
+
+```sh
+deno task sync                 # http://127.0.0.1:8787
+python -m http.server 8000     # 另开一个终端
+# 浏览器打开 http://127.0.0.1:8000/?sync=http://127.0.0.1:8787
+```
+
+页面和联机服务都用 HTTP；GitHub Pages 的 HTTPS 页面不能直连 HTTP 中转（混合内容会被浏览器拦截）。
+
+### 接口
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `POST` | `/state` | 房主提交 `{ tableId, hostToken, humanSeats, view }`，写入/更新整桌状态 |
+| `GET` | `/state?tableId&seatIndex&token&sinceVersion` | 某个座位拉取自己的投影；版本没变返回 `204` |
+| `POST` | `/action` | 远端座位提交 `{ tableId, seatIndex, token, turnToken, action, amount }` |
+| `GET` | `/action?tableId&turnToken&hostToken` | 房主拉取该回合的远端操作；没有返回 `204` |
+| `DELETE` | `/state?tableId&hostToken` | 房主提前结束并清理牌桌 |
+| `GET` | `/health` | 健康检查，返回 `storage: "kv"` 或 `"memory"` |
+
+安全边界：
+
+- `humanSeats` 必须带随机 `token`，`GET /state` 只返回该座位自己的 `seat`；换 `seatIndex` 拿不到别人的牌。
+- 只允许真人座位的 `seatView` 上传；Bot 座位的牌不会进中转。
+- `hostToken` 保护 `POST /state` 和 `GET /action`，嘉宾无法覆盖牌桌或偷看操作队列。
+- CORS 默认只放行 `https://pphun811-maker.github.io` 和 localhost；可用 `ALLOWED_ORIGINS` 覆盖。
+
+### 部署（任选一家）
+
+中转只有一个无依赖的 Deno 文件；仓库根目录的 `Dockerfile` 可以直接跑在任何 Docker 平台，
+`render.yaml` 是 Render 的一键蓝图。
+
+**Render（推荐：免费、免信用卡、国内网络可打开）**
+
+1. 把仓库推到 GitHub。
+2. [Render Dashboard](https://dashboard.render.com/) → New → Blueprint → 连接仓库；Render 会读取
+   `render.yaml`，用 `Dockerfile` 构建并启动服务。
+3. 复制服务地址，例如 `https://poker-sync-xxxx.onrender.com`。
+4. 填到 `js/syncConfig.js` 的 `DEFAULT_SYNC_BASE_URL`，或房主首次打开页面时用
+   `?sync=https://poker-sync-xxxx.onrender.com`。
+
+Render 免费服务约 15 分钟无流量后休眠，冷启动约 1 分钟；存储是进程内内存，休眠/重启后从空开始。
+开打前先访问 `<地址>/health` 唤醒，再开新局。
+
+**Zeabur / Koyeb / Fly.io / 自己的 VPS**
+
+同一份 `Dockerfile`，暴露 `8000` 端口，设置 `SYNC_STORAGE=memory` 和
+`ALLOWED_ORIGINS=https://pphun811-maker.github.io` 即可。Zeabur 有亚太区免费额度，Koyeb/Fly 有
+小额免费/低价实例。
+
+**Deno Deploy（仅限已有账号）**
+
+Deno 团队已加入 Cloudflare，Deno Deploy 将于 2027 年 4 月左右下线，不再推荐新项目使用。已有账号的
+话：连接仓库、Entrypoint 填 `server/sync.js`、在 Databases 里新建并绑定 **Deno KV**（多实例部署必须
+有 KV，否则只能单实例）。
+
+**本机 + 隧道（不想注册任何云服务）**
+
+运行 `deno task sync`，然后 `cloudflared tunnel --url http://127.0.0.1:8787`，把打印的 HTTPS 地址
+填进 `?sync=`。房主电脑必须一直开着，但没有冷启动和额度限制；如果 `trycloudflare.com` 对朋友不可达，
+可换 cpolar、NATAPP、花生壳或自己的 VPS。
+
+免费额度足够朋友局使用；超长牌局或多桌同时运行可能触及请求 / KV 读写额度。牌桌 8 小时过期，待处理操作 15 分钟过期。

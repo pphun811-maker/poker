@@ -37,11 +37,25 @@ export function getSeatPendingAction(tableView, seatIndex) {
 	return null;
 }
 
-export function configureViewSwitchLink(linkEl, targetPath, tableId, seatIndex) {
+export function configureViewSwitchLink(
+	linkEl,
+	targetPath,
+	tableId,
+	seatIndex,
+	extraParams = {},
+) {
 	if (!linkEl || !tableId || seatIndex === null) {
 		return;
 	}
-	linkEl.href = `${targetPath}?tableId=${encodeURIComponent(tableId)}&seatIndex=${seatIndex}`;
+	const url = new URL(targetPath, globalThis.location.href);
+	url.searchParams.set("tableId", tableId);
+	url.searchParams.set("seatIndex", `${seatIndex}`);
+	for (const [key, value] of Object.entries(extraParams)) {
+		if (typeof value === "string" && value !== "") {
+			url.searchParams.set(key, value);
+		}
+	}
+	linkEl.href = url.toString();
 }
 
 export function setViewSwitchLinkVisible(linkEl, isVisible) {
@@ -587,6 +601,7 @@ export function createHumanTurnController({
 export function createSeatActionControls({
 	tableId,
 	seatIndex,
+	seatToken = "",
 	actionEndpoint,
 	actionStep = 10,
 	visibleElements = [],
@@ -615,7 +630,7 @@ export function createSeatActionControls({
 	});
 
 	async function submitActionRequest(actionRequest) {
-		if (!currentPendingAction || !tableId || seatIndex === null || isSubmittingAction) {
+		if (!currentPendingAction || !tableId || seatIndex === null || !seatToken || isSubmittingAction) {
 			return;
 		}
 
@@ -629,6 +644,7 @@ export function createSeatActionControls({
 				body: JSON.stringify({
 					tableId,
 					seatIndex,
+					token: seatToken,
 					turnToken: currentPendingAction.turnToken,
 					action: actionRequest.action,
 					amount: actionRequest.amount ?? null,

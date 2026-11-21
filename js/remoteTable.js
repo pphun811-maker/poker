@@ -24,6 +24,8 @@ import {
 } from "./shared/humanTurnController.js";
 import { getSeatView, getTableView } from "./shared/syncViewModel.js";
 import { initSound, initSoundButton, playTurnChime } from "./shared/sound.js";
+import { getSyncEndpoints, rememberSyncBaseUrl } from "./syncConfig.js";
+import { t } from "./i18n.js";
 import {
 	clearChipTransferAnimation,
 	clearRenderedSeat,
@@ -79,11 +81,12 @@ const seatRefs = Array.from(document.querySelectorAll(".seat")).map((seatEl, sea
 const urlParams = new URLSearchParams(globalThis.location.search);
 const tableId = urlParams.get("tableId") || "";
 const seatIndexParam = parseOptionalInt(urlParams.get("seatIndex"));
-const STATE_ENDPOINT = "https://poker.tehes.deno.net/state";
-const ACTION_ENDPOINT = "https://poker.tehes.deno.net/action";
+const seatToken = urlParams.get("token") || "";
+rememberSyncBaseUrl();
+const syncEndpoints = getSyncEndpoints();
 const REFRESH_INTERVAL = 750;
 const ACTION_STEP = 10;
-const DEFAULT_NOTIFICATION = "Waiting for updates...";
+const DEFAULT_NOTIFICATION = t("sync.waiting");
 let lastVersion = 0;
 let pollTimeoutId = null;
 let isPolling = false;
@@ -103,7 +106,8 @@ function parseOptionalInt(value) {
 const actionControls = createSeatActionControls({
 	tableId,
 	seatIndex: seatIndexParam,
-	actionEndpoint: ACTION_ENDPOINT,
+	seatToken,
+	actionEndpoint: syncEndpoints.action,
 	actionStep: ACTION_STEP,
 	visibleElements: [
 		foldButton,
@@ -116,7 +120,7 @@ const actionControls = createSeatActionControls({
 	amountInput,
 	decrementButton: amountDecrementButton,
 	incrementButton: amountIncrementButton,
-	onActionError: () => setNotification("Action request failed."),
+	onActionError: () => setNotification(t("sync.actionFailed")),
 	onNewTurn: () => playTurnChime(),
 });
 
@@ -158,7 +162,7 @@ function applyRemoteState(payload) {
 	if (!tableView || !seatView || seatView.seatIndex !== seatIndexParam) {
 		setViewSwitchLinkVisible(remoteSwitchLink, false);
 		actionControls.hide();
-		setNotification("Seat unavailable.");
+		setNotification(t("sync.seatUnavailable"));
 		clearChipTransferAnimation(tableRenderTarget);
 		seatRefs.forEach(clearRenderedSeat);
 		renderCommunityCards(communityCardSlots, []);
@@ -216,16 +220,19 @@ function applyRemoteState(payload) {
 
 async function pollState() {
 	if (
-		!tableId || seatIndexParam === null || isPolling || document.visibilityState !== "visible"
+		!tableId || seatIndexParam === null || !seatToken || !syncEndpoints.state ||
+		isPolling || document.visibilityState !== "visible"
 	) {
 		return;
 	}
 
 	isPolling = true;
 	try {
-		const url = `${STATE_ENDPOINT}?tableId=${
-			encodeURIComponent(tableId)
-		}&seatIndex=${seatIndexParam}&sinceVersion=${lastVersion}`;
+		const url = new URL(syncEndpoints.state);
+		url.searchParams.set("tableId", tableId);
+		url.searchParams.set("seatIndex", `${seatIndexParam}`);
+		url.searchParams.set("token", seatToken);
+		url.searchParams.set("sinceVersion", `${lastVersion}`);
 		const res = await fetch(url, { cache: "no-store" });
 		if (res.status === 204) {
 			return;
@@ -238,12 +245,16 @@ async function pollState() {
 		}
 		setViewSwitchLinkVisible(remoteSwitchLink, false);
 		actionControls.hide();
-		setNotification("Table unavailable.");
+		if (res.status === 404) {
+			// A restarted host can reuse the table id with a fresh version counter.
+			lastVersion = 0;
+		}
+		setNotification(t("sync.tableUnavailable"));
 	} catch (error) {
 		console.warn("state fetch failed", error);
 		setViewSwitchLinkVisible(remoteSwitchLink, false);
 		actionControls.hide();
-		setNotification("Connection lost.");
+		setNotification(t("sync.connectionLost"));
 	} finally {
 		isPolling = false;
 		schedulePoll();
@@ -280,19 +291,26 @@ function init() {
 	initSoundButton(soundButton);
 	document.addEventListener("visibilitychange", handleVisibilityChange);
 	actionControls.init();
-	configureViewSwitchLink(remoteSwitchLink, "hole-cards.html", tableId, seatIndexParam);
+	configureViewSwitchLink(remoteSwitchLink, "hole-cards.html", tableId, seatIndexParam, {
+		sync: syncEndpoints.base,
+		token: seatToken,
+	});
 	clearChipTransferAnimation(tableRenderTarget);
 	seatRefs.forEach(clearRenderedSeat);
 	setViewSwitchLinkVisible(remoteSwitchLink, false);
 	renderCommunityCards(communityCardSlots, []);
 	actionControls.hide();
 
-	if (!tableId || seatIndexParam === null) {
-		setNotification("Missing table link.");
+	if (!syncEndpoints.state) {
+		setNotification(t("sync.notConfigured"));
+		return;
+	}
+	if (!tableId || seatIndexParam === null || !seatToken) {
+		setNotification(t("sync.missingLink"));
 		return;
 	}
 
-	setNotification("Loading table...");
+	setNotification(t("sync.loading"));
 	pollState();
 }
 
