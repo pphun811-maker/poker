@@ -82,14 +82,17 @@ const urlParams = new URLSearchParams(globalThis.location.search);
 const tableId = urlParams.get("tableId") || "";
 const seatIndexParam = parseOptionalInt(urlParams.get("seatIndex"));
 const seatToken = urlParams.get("token") || "";
+let pendingJoin = urlParams.get("pending") === "1";
 rememberSyncBaseUrl();
 const syncEndpoints = getSyncEndpoints();
 const REFRESH_INTERVAL = 750;
+const LOBBY_REFRESH_INTERVAL = 3000;
 const ACTION_STEP = 10;
 const DEFAULT_NOTIFICATION = t("sync.waiting");
 let lastVersion = 0;
 let pollTimeoutId = null;
 let isPolling = false;
+let waitingForHost = false;
 
 /* --------------------------------------------------------------------------------------------------
 Helpers
@@ -240,16 +243,22 @@ async function pollState() {
 		if (res.ok) {
 			const payload = await res.json();
 			lastVersion = payload.version;
+			waitingForHost = false;
+			pendingJoin = false;
 			applyRemoteState(payload);
 			return;
 		}
 		setViewSwitchLinkVisible(remoteSwitchLink, false);
 		actionControls.hide();
 		if (res.status === 404) {
-			// A restarted host can reuse the table id with a fresh version counter.
+			// A restarted host can reuse the table id with a fresh version counter. A pending
+			// invite link also starts before the host has created the room.
 			lastVersion = 0;
+			waitingForHost = pendingJoin;
 		}
-		setNotification(t("sync.tableUnavailable"));
+		setNotification(
+			waitingForHost ? t("invite.waitingForHost") : t("sync.tableUnavailable"),
+		);
 	} catch (error) {
 		console.warn("state fetch failed", error);
 		setViewSwitchLinkVisible(remoteSwitchLink, false);
@@ -266,7 +275,10 @@ function schedulePoll() {
 		pollTimeoutId = null;
 		return;
 	}
-	pollTimeoutId = setTimeout(pollState, REFRESH_INTERVAL);
+	pollTimeoutId = setTimeout(
+		pollState,
+		waitingForHost ? LOBBY_REFRESH_INTERVAL : REFRESH_INTERVAL,
+	);
 }
 
 function handleVisibilityChange() {
@@ -294,6 +306,7 @@ function init() {
 	configureViewSwitchLink(remoteSwitchLink, "hole-cards.html", tableId, seatIndexParam, {
 		sync: syncEndpoints.base,
 		token: seatToken,
+		pending: pendingJoin ? "1" : "",
 	});
 	clearChipTransferAnimation(tableRenderTarget);
 	seatRefs.forEach(clearRenderedSeat);
@@ -310,7 +323,9 @@ function init() {
 		return;
 	}
 
-	setNotification(t("sync.loading"));
+	setNotification(
+		pendingJoin ? t("invite.waitingForHost") : t("sync.loading"),
+	);
 	pollState();
 }
 

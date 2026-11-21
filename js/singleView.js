@@ -54,14 +54,17 @@ const onlineOnlyElements = [betEl, potEl, singleActionPanelEl];
 const urlParams = new URLSearchParams(globalThis.location.search);
 const tableId = urlParams.get("tableId") || "";
 const seatToken = urlParams.get("token") || "";
+let pendingJoin = urlParams.get("pending") === "1";
 rememberSyncBaseUrl();
 const syncEndpoints = getSyncEndpoints();
 const REFRESH_INTERVAL = 750;
+const LOBBY_REFRESH_INTERVAL = 3000;
 const ACTION_STEP = 10;
 let lastVersion = 0;
 let pollTimeoutId = null;
 let isPolling = false;
 let hasSyncedState = false;
+let waitingForHost = false;
 
 function parseOptionalInt(value) {
 	if (value === null || value === "") {
@@ -117,6 +120,7 @@ function init() {
 	configureViewSwitchLink(singleSwitchLink, "remoteTable.html", tableId, seatIndexParam, {
 		sync: syncEndpoints.base,
 		token: seatToken,
+		pending: pendingJoin ? "1" : "",
 	});
 	clearSyncedDisplays();
 	applyParams();
@@ -252,14 +256,20 @@ async function pollState() {
 		if (res.ok) {
 			const payload = await res.json();
 			lastVersion = payload.version;
+			waitingForHost = false;
+			pendingJoin = false;
 			setOnlineElementsVisible(applyRemoteState(payload));
 		} else {
 			setOnlineElementsVisible(false);
 			if (res.status === 404) {
-				// A restarted host can reuse the table id with a fresh version counter.
+				// A restarted host can reuse the table id with a fresh version counter; an invite
+				// link can also open before the host has created the room.
 				lastVersion = 0;
+				waitingForHost = pendingJoin;
 			}
-			renderNotifications([t("sync.tableUnavailable")]);
+			renderNotifications([
+				waitingForHost ? t("invite.waitingForHost") : t("sync.tableUnavailable"),
+			]);
 		}
 	} catch (error) {
 		console.warn("state fetch failed", error);
@@ -276,7 +286,10 @@ function schedulePoll() {
 		pollTimeoutId = null;
 		return;
 	}
-	pollTimeoutId = setTimeout(pollState, REFRESH_INTERVAL);
+	pollTimeoutId = setTimeout(
+		pollState,
+		waitingForHost ? LOBBY_REFRESH_INTERVAL : REFRESH_INTERVAL,
+	);
 }
 
 function handleVisibilityChange() {

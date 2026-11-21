@@ -10,9 +10,20 @@ Version log writing guide:
 - Add optional contributor credits as dedicated metadata instead of release notes.
 */
 
-export const APP_VERSION = "1.7.0";
+export const APP_VERSION = "1.8.0";
 
 export const VERSION_LOG = [
+	{
+		version: "1.8.0",
+		date: "2026-11-21",
+		title: "Invite players before the deal",
+		notes: [
+			"A new Invite button creates private seat links and QR codes before the first hand, so friends can gather in a lobby first.",
+			"Invited players can open their link and wait; their cards and action controls appear as soon as the host starts.",
+			"The invite panel can also be reopened from the footer during a game to share a specific seat link.",
+		],
+		estimated: false,
+	},
 	{
 		version: "1.7.0",
 		date: "2026-11-21",

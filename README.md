@@ -98,8 +98,8 @@ The same table supports different ways to play. The mode depends only on how man
 
 3. Start the game.
 
-4. Human players can then join on their own devices via QR code or direct link. For remote friends,
-   share the per-seat link after the first hand is dealt.
+4. Click **Invite** to get the private link and QR code for each human seat. Guests can open their
+   link before the deal and wait in the lobby.
 
 The table handles dealing, blinds, betting, and showdown automatically.
 
@@ -151,6 +151,9 @@ GitHub Pages only serves static files, so online seats need one small relay. The
 - **Solo and spectator games stay local** and keep a clean URL without `tableId`.
 - **Solo saves are local-only**: unfinished Solo vs Bots games are stored in the browser on the
   shared device; multiplayer sync does not create persistent cloud sessions.
+- **Invite before the deal**: the host fills in human names and clicks **Invite**. The panel shows a
+  private link and QR code per seat, so friends can open their link and wait in a lobby before the
+  first hand. The panel is also available from the footer during a game.
 - **Human seats expose two entry points**: a QR code for the companion view (`hole-cards.html`) and
   a direct link for the full remote table (`remoteTable.html`). Both carry the seat token and relay
   URL, and can be switched at any time.
@@ -228,7 +231,8 @@ Use HTTP for both the page and the relay. A GitHub Pages HTTPS page cannot call 
 ### Limitations
 
 - The host device must stay open; closing it ends the online table.
-- Guests join after the hand is dealt, from the per-seat link/QR shown on the host table.
+- Invite links are tied to seat order and names. Do not reorder seats or rename players after
+  inviting, or the links will point at the wrong seat.
 - The host browser is authoritative, so a technically savvy host can see all cards. This is the same
   trust model as shared-table play.
 

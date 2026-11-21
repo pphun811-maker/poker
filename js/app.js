@@ -149,6 +149,12 @@ const instructionsOverlay = document.querySelector("#instructions-overlay");
 const instructionsCloseButton = document.querySelector(
 	"#instructions-close-button",
 );
+const inviteButton = document.querySelector("#invite-button");
+const inviteFooterButton = document.querySelector("#invite-footer-button");
+const inviteOverlay = document.querySelector("#invite-overlay");
+const inviteCloseButton = document.querySelector("#invite-close-button");
+const inviteList = document.querySelector("#invite-list");
+const inviteSummary = document.querySelector("#invite-summary");
 const cheatOverlay = document.querySelector("#cheat-overlay");
 const cheatCloseButton = document.querySelector("#cheat-close-button");
 const logList = document.querySelector("#log-list");
@@ -210,6 +216,10 @@ const overlays = {
 	instructions: {
 		el: instructionsOverlay,
 	},
+	invite: {
+		el: inviteOverlay,
+		beforeOpen: () => renderInviteOverlay(),
+	},
 	cheat: {
 		el: cheatOverlay,
 		beforeOpen: () => refreshCheatPanel(),
@@ -270,6 +280,9 @@ const STATE_SYNC_DELAY = 750;
 const ACTION_POLL_INTERVAL = 1000;
 let stateSyncTimer = null;
 let stateSyncTimerDelay = null;
+let stateSyncInFlight = false;
+let stateSyncDirty = false;
+let lobbySyncPromise = null;
 let runoutPhaseTimer = null;
 let chipTransferFinishTimer = null;
 let lastGameSeatConfig = [];
@@ -860,6 +873,7 @@ function renderRestoredGameState() {
 	syncLogUi();
 	syncCheatAndReplayButtons();
 	instructionsButton.classList.add("hidden");
+	inviteButton.classList.add("hidden");
 	startButton.classList.toggle("hidden", gameState.handInProgress === true);
 	if (!gameState.handInProgress) {
 		setStartButtonLabel("button.newRound");
@@ -1932,11 +1946,30 @@ function getSeatSyncToken(seatIndex) {
 	return syncSeatTokens.get(seatIndex) ?? "";
 }
 
+async function deleteRemoteTable(tableIdValue, hostTokenValue) {
+	if (!syncEndpoints.state) {
+		return;
+	}
+	try {
+		const url = new URL(syncEndpoints.state);
+		url.searchParams.set("tableId", tableIdValue);
+		url.searchParams.set("hostToken", hostTokenValue);
+		await fetch(url, { method: "DELETE", cache: "no-store" });
+	} catch (error) {
+		logFlow("table cleanup failed", error);
+	}
+}
+
 function resetStateSyncRuntime() {
+	const closedTableId = tableId;
+	const closedHostToken = syncHostToken;
 	tableId = null;
 	syncHostToken = null;
 	syncSeatTokens.clear();
 	lastSyncedViewJson = null;
+	if (closedTableId !== null && closedHostToken) {
+		void deleteRemoteTable(closedTableId, closedHostToken);
+	}
 }
 
 function initStateSyncForGame() {
@@ -1951,7 +1984,7 @@ function initStateSyncForGame() {
 	}
 
 	const tableUrl = new URL(globalThis.location.href);
-	tableId = tableUrl.searchParams.get("tableId") ||
+	tableId = tableUrl.searchParams.get("tableId") || tableId ||
 		Math.random().toString(36).slice(2, 10);
 	syncHostToken = getOrCreateSyncHostToken(tableId);
 	syncSeatTokens = getOrCreateSyncSeatTokens(
@@ -1959,6 +1992,256 @@ function initStateSyncForGame() {
 		getHumanPlayers().map((player) => player.seatIndex),
 	);
 	syncTableUrlWithState();
+}
+
+function getInviteSeats() {
+	if (gameState.gameStarted) {
+		return getHumanPlayers()
+			.filter((player) => player.chips > 0)
+			.map((player) => ({
+				seatIndex: player.seatIndex,
+				seatSlot: player.seatSlot,
+				name: player.name,
+			}));
+	}
+
+	const seats = [];
+	let seatIndex = 0;
+	for (const seatRef of seatRefs) {
+		if (seatRef.seatEl.classList.contains("hidden")) {
+			continue;
+		}
+		const name = seatRef.nameEl.textContent.replace(/\s+/g, " ").trim();
+		const isBot = seatRef.seatEl.classList.contains("bot") || name === "";
+		if (!isBot) {
+			seats.push({ seatIndex, seatSlot: seatRef.seatSlot, name });
+		}
+		seatIndex++;
+	}
+	return seats;
+}
+
+function ensureInviteRoom(seats) {
+	if (!syncEndpoints.state || !syncEndpoints.action) {
+		return false;
+	}
+	if (tableId === null) {
+		tableId = Math.random().toString(36).slice(2, 10);
+	}
+	if (!syncHostToken) {
+		syncHostToken = getOrCreateSyncHostToken(tableId);
+	}
+	syncSeatTokens = getOrCreateSyncSeatTokens(
+		tableId,
+		seats.map((seat) => seat.seatIndex),
+	);
+	lastSyncedViewJson = null;
+	syncTableUrlWithState();
+	return true;
+}
+
+function buildInviteUrl(seat) {
+	const url = createPageUrl("remoteTable.html");
+	url.searchParams.set("tableId", tableId);
+	url.searchParams.set("seatIndex", `${seat.seatIndex}`);
+	url.searchParams.set("token", getSeatSyncToken(seat.seatIndex));
+	if (!gameState.gameStarted) {
+		url.searchParams.set("pending", "1");
+	}
+	appendSyncParam(url);
+	return url.toString();
+}
+
+function copyTextFallback(text) {
+	const area = document.createElement("textarea");
+	area.value = text;
+	area.style.position = "fixed";
+	area.style.opacity = "0";
+	document.body.append(area);
+	area.select();
+	let copied = false;
+	try {
+		copied = document.execCommand("copy");
+	} catch {
+		copied = false;
+	}
+	area.remove();
+	return copied;
+}
+
+async function copyInviteLink(text) {
+	try {
+		if (navigator.clipboard?.writeText) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch {
+		// Fall through to the selection-based copy path.
+	}
+	return copyTextFallback(text);
+}
+
+function buildLobbyView(seats) {
+	const playersPublic = seats.map((seat) => ({
+		seatIndex: seat.seatIndex,
+		seatSlot: seat.seatSlot,
+		name: seat.name,
+		chips: 2000,
+		roundBet: 0,
+		folded: false,
+		allIn: false,
+		dealer: false,
+		smallBlind: false,
+		bigBlind: false,
+		publicHoleCards: [null, null],
+		handStrengthLabel: "",
+		winProbability: null,
+		showWinProbability: false,
+		winner: false,
+		actionState: null,
+		winnerReaction: null,
+	}));
+	return {
+		table: {
+			phase: "lobby",
+			pot: 0,
+			activeSeatIndex: null,
+			communityCards: [],
+			notifications: [t("invite.waitingForHost")],
+			playersPublic,
+			chipTransfer: null,
+			pendingAction: null,
+		},
+		seatViews: seats.map((seat) => ({
+			seatIndex: seat.seatIndex,
+			seatSlot: seat.seatSlot,
+			name: seat.name,
+			chips: 2000,
+			roundBet: 0,
+			folded: false,
+			allIn: false,
+			holeCards: [],
+			handStrengthLabel: "",
+			winProbability: null,
+			showWinProbability: false,
+		})),
+	};
+}
+
+function sendLobbyState(seats) {
+	if (!syncEndpoints.state || !syncHostToken || tableId === null) {
+		return Promise.resolve();
+	}
+	const humanSeats = seats.map((seat) => ({
+		seatIndex: seat.seatIndex,
+		token: getSeatSyncToken(seat.seatIndex),
+	}));
+	const request = (async () => {
+		try {
+			const res = await fetch(syncEndpoints.state, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					tableId,
+					hostToken: syncHostToken,
+					humanSeats,
+					view: buildLobbyView(seats),
+				}),
+			});
+			if (!res.ok) {
+				throw new Error(`lobby sync failed with status ${res.status}`);
+			}
+			lastSyncedViewJson = null;
+		} catch (error) {
+			logFlow("lobby sync failed", error);
+		}
+	})();
+	let tracked = null;
+	tracked = request.finally(() => {
+		if (lobbySyncPromise === tracked) {
+			lobbySyncPromise = null;
+		}
+	});
+	lobbySyncPromise = tracked;
+	return tracked;
+}
+
+function renderInviteOverlay() {
+	if (!inviteList || !inviteSummary) {
+		return;
+	}
+	inviteList.replaceChildren();
+	const seats = getInviteSeats();
+	if (!syncEndpoints.state || !syncEndpoints.action) {
+		inviteSummary.textContent = t("invite.noRelay");
+		return;
+	}
+	if (seats.length < 2) {
+		inviteSummary.textContent = t("invite.needTwoPlayers");
+		return;
+	}
+	if (!ensureInviteRoom(seats)) {
+		inviteSummary.textContent = t("invite.noRelay");
+		return;
+	}
+	inviteSummary.textContent = `${
+		gameState.gameStarted ? t("invite.liveHint") : t("invite.pendingHint")
+	} ${t("invite.keepSeats")}`;
+
+	for (const seat of seats) {
+		const card = document.createElement("article");
+		card.className = "invite-card";
+		const title = document.createElement("h3");
+		title.textContent = seat.name;
+		const seatLabel = document.createElement("div");
+		seatLabel.className = "invite-seat";
+		seatLabel.textContent = tf("invite.seatLabel", { seat: seat.seatIndex + 1 });
+		const qr = document.createElement("div");
+		qr.className = "invite-qr";
+		const url = buildInviteUrl(seat);
+		QrCreator.render({
+			text: url,
+			size: 164,
+			fill: "#333",
+			background: "#fff",
+			radius: 0,
+		}, qr);
+		const urlInput = document.createElement("input");
+		urlInput.className = "invite-url";
+		urlInput.readOnly = true;
+		urlInput.value = url;
+		urlInput.addEventListener("focus", () => urlInput.select());
+		const actions = document.createElement("div");
+		actions.className = "invite-actions";
+		const copyButton = document.createElement("button");
+		copyButton.type = "button";
+		copyButton.className = "sound-toggle";
+		copyButton.textContent = t("invite.copy");
+		copyButton.addEventListener("click", async () => {
+			const copied = await copyInviteLink(url);
+			if (!copied) {
+				urlInput.focus();
+				return;
+			}
+			copyButton.textContent = t("invite.copied");
+			setTimeout(() => {
+				copyButton.textContent = t("invite.copy");
+			}, 1500);
+		});
+		const openLink = document.createElement("a");
+		openLink.className = "action-link";
+		openLink.href = url;
+		openLink.target = "_blank";
+		openLink.rel = "noopener noreferrer";
+		openLink.textContent = t("invite.open");
+		actions.append(copyButton, openLink);
+		card.append(title, seatLabel, qr, urlInput, actions);
+		inviteList.append(card);
+	}
+
+	if (!gameState.gameStarted) {
+		sendLobbyState(seats);
+	}
 }
 
 function createTurnToken() {
@@ -2030,36 +2313,49 @@ async function fetchPendingRemoteAction(turnToken) {
 }
 
 async function sendTableState() {
-	if (!hasStateSyncEnabled() || !syncHostToken) {
+	if (!gameState.gameStarted || !hasStateSyncEnabled() || !syncHostToken) {
 		return;
 	}
-
-	const humanSeats = getHumanPlayers()
-		.map((player) => ({
-			seatIndex: player.seatIndex,
-			token: getSeatSyncToken(player.seatIndex),
-		}))
-		.filter((seat) => Boolean(seat.token));
-	if (humanSeats.length === 0) {
+	// Do not let a slow lobby POST land after the first real hand state.
+	if (lobbySyncPromise) {
+		try {
+			await lobbySyncPromise;
+		} catch {
+			// The lobby post is best-effort.
+		}
+	}
+	if (stateSyncInFlight) {
+		stateSyncDirty = true;
 		return;
 	}
-	const humanIndexes = new Set(humanSeats.map((seat) => seat.seatIndex));
-	const view = buildSyncView(gameState, notifArr.slice(0, MAX_ITEMS));
-	// Only human seats need private projections. Keeping bot seat views out of the payload limits
-	// what the relay stores and makes sure a seat token can never address a bot.
-	view.seatViews = view.seatViews.filter((seatView) => humanIndexes.has(seatView.seatIndex));
-	const viewJson = JSON.stringify(view);
-	if (viewJson === lastSyncedViewJson) {
-		return;
-	}
-	const payload = {
-		tableId,
-		hostToken: syncHostToken,
-		humanSeats,
-		view,
-	};
+	stateSyncInFlight = true;
 
 	try {
+		const humanSeats = getHumanPlayers()
+			.map((player) => ({
+				seatIndex: player.seatIndex,
+				token: getSeatSyncToken(player.seatIndex),
+			}))
+			.filter((seat) => Boolean(seat.token));
+		if (humanSeats.length === 0) {
+			return;
+		}
+		const humanIndexes = new Set(humanSeats.map((seat) => seat.seatIndex));
+		const view = buildSyncView(gameState, notifArr.slice(0, MAX_ITEMS));
+		// Only human seats need private projections. Keeping bot seat views out of the payload limits
+		// what the relay stores and makes sure a seat token can never address a bot.
+		view.seatViews = view.seatViews.filter((seatView) => humanIndexes.has(seatView.seatIndex));
+		const viewJson = JSON.stringify(view);
+		if (viewJson === lastSyncedViewJson) {
+			return;
+		}
+		const payload = {
+			tableId,
+			hostToken: syncHostToken,
+			humanSeats,
+			view,
+		};
+
 		const res = await fetch(syncEndpoints.state, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -2073,6 +2369,12 @@ async function sendTableState() {
 		logFlow("state sync failed", error);
 		lastSyncedViewJson = null;
 		queueStateSync();
+	} finally {
+		stateSyncInFlight = false;
+		if (stateSyncDirty) {
+			stateSyncDirty = false;
+			queueStateSync(0);
+		}
 	}
 }
 
@@ -2440,6 +2742,7 @@ function startGame() {
 			);
 			startButton.classList.add("hidden");
 			instructionsButton.classList.add("hidden");
+			inviteButton.classList.add("hidden");
 			closeAllOverlays();
 			gameState.gameStarted = true;
 			syncCheatAndReplayButtons();
@@ -2480,6 +2783,7 @@ function startGame() {
 			setStartButtonLabel("button.start");
 			startButton.classList.remove("hidden");
 			instructionsButton.classList.remove("hidden");
+			inviteButton.classList.remove("hidden");
 			syncCheatAndReplayButtons();
 			enqueueNotification(t("notify.notEnoughPlayers"));
 		}
@@ -2649,6 +2953,7 @@ function restartTournament() {
 	renderPot();
 	setStartButtonLabel("button.start");
 	startButton.classList.remove("hidden");
+	inviteButton.classList.remove("hidden");
 	enqueueNotification(tf("notify.replayReady"));
 }
 
@@ -4170,6 +4475,9 @@ function init() {
 		if (playerProfile && !profileOverlay.classList.contains("hidden")) {
 			renderPlayerProfile(profileElements, playerProfile);
 		}
+		if (!inviteOverlay.classList.contains("hidden")) {
+			renderInviteOverlay();
+		}
 	});
 	try {
 		const storage = getLocalStorage();
@@ -4231,6 +4539,10 @@ function init() {
 		() => openOverlay("instructions"),
 		false,
 	);
+	for (const button of [inviteButton, inviteFooterButton]) {
+		button?.addEventListener("click", () => openOverlay("invite"), false);
+	}
+	inviteCloseButton?.addEventListener("click", () => closeOverlay("invite"), false);
 	versionButton.addEventListener(
 		"click",
 		() => openOverlay("version"),
@@ -4386,7 +4698,7 @@ poker.init();
  * - AUTO_RELOAD_ON_SW_UPDATE: reload page once after an update
  -------------------------------------------------------------------------------------------------- */
 const USE_SERVICE_WORKER = false;
-const SERVICE_WORKER_VERSION = "2026-11-21-v6";
+const SERVICE_WORKER_VERSION = "2026-11-21-v7";
 const AUTO_RELOAD_ON_SW_UPDATE = true;
 
 initServiceWorker({

@@ -289,6 +289,7 @@
 								id="start-button-label" data-i18n="button.start">开始</span></button>
 					</div>
 				<button type="button" id="instructions-button" name="button" data-i18n="button.instructions">玩法说明</button>
+				<button type="button" id="invite-button" name="button" data-i18n="button.invite">摇人</button>
 				<button type="button" id="stats-button" class="hidden" name="button" data-i18n="button.stats">统计</button>
 				<button type="button" id="profile-button" class="hidden" name="button" data-i18n="button.profile">生涯</button>
 				<button type="button" id="log-button" class="hidden" name="button" data-i18n="button.log">记录</button>
@@ -311,6 +312,7 @@
 			<a href="https://github.com/Tehes/poker">made by Tehes</a>
 			<span class="credit-note" data-i18n="footer.unofficial">非官方修改版</span>
 			<button type="button" id="replay-button" class="sound-toggle hidden" name="button" data-i18n="button.replay">重玩</button>
+			<button type="button" id="invite-footer-button" class="sound-toggle" name="button" data-i18n="button.invite">摇人</button>
 			<button type="button" id="version-button" class="version-button" data-i18n="button.version">版本</button>
 			<button id="lang-button" class="sound-toggle">中文</button>
 		</div>
@@ -427,6 +429,14 @@
 			<div id="version-list"></div>
 		</div>
 		<button type="button" id="version-close-button" class="overlay-close" data-i18n="ui.close">关闭</button>
+	</section>
+	<section id="invite-overlay" class="overlay-panel invite-panel hidden">
+		<div class="invite-header">
+			<h2 data-i18n="invite.title">摇人</h2>
+			<p id="invite-summary"></p>
+		</div>
+		<div id="invite-list" class="invite-list"></div>
+		<button type="button" id="invite-close-button" class="overlay-close" data-i18n="ui.close">关闭</button>
 	</section>
 	<section id="instructions-overlay" class="overlay-panel instructions-panel hidden">
 		<div class="instructions-content">

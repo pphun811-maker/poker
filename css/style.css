@@ -155,6 +155,7 @@ button:disabled {
 #replay-button,
 #cheat-button,
 #instructions-button,
+#invite-button,
 #fast-forward-button {
     width: auto;
 }
@@ -559,6 +560,88 @@ OVERLAY
 .instructions-panel {
     width: min(860px, 96vw);
     max-height: min(84vh, 920px);
+}
+
+.invite-panel {
+    width: min(920px, 96vw);
+    max-height: min(88vh, 980px);
+}
+
+.invite-header h2 {
+    margin: 0;
+    color: var(--font-color);
+    font-size: 1.4rem;
+}
+
+.invite-header p {
+    margin: 0.35rem 0 0;
+    color: var(--blue-lightest);
+    line-height: 1.5;
+}
+
+.invite-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 0.85rem;
+    padding: 0.25rem;
+    overflow-y: auto;
+}
+
+.invite-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.85rem;
+    border-radius: 12px;
+    background-color: hsla(220, 40%, 20%, 0.45);
+    border: 1px solid hsla(0, 0%, 100%, 0.08);
+    box-shadow: var(--shadow-light);
+}
+
+.invite-card h3 {
+    margin: 0;
+    font-size: 1rem;
+    text-align: center;
+    overflow-wrap: anywhere;
+}
+
+.invite-seat {
+    color: var(--blue-lightest);
+    font-size: 0.75rem;
+}
+
+.invite-qr {
+    width: 164px;
+    height: 164px;
+    padding: 6px;
+    border-radius: 8px;
+    background-color: #fff;
+}
+
+.invite-qr canvas,
+.invite-qr img {
+    width: 100% !important;
+    height: 100% !important;
+    display: block;
+}
+
+.invite-url {
+    width: 100%;
+    min-width: 0;
+    padding: 0.35rem 0.45rem;
+    border-radius: 6px;
+    border: 1px solid hsla(0, 0%, 100%, 0.15);
+    background-color: hsla(220, 40%, 15%, 0.6);
+    color: var(--font-color);
+    font-size: 0.72rem;
+}
+
+.invite-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.45rem;
 }
 
 .resume-panel {
