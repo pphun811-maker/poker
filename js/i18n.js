@@ -123,7 +123,7 @@ registerStrings("button", {
 	newRound: { zh: "下一手", en: "New Round" },
 	replay: { zh: "重玩", en: "Replay" },
 	instructions: { zh: "玩法说明", en: "Instructions" },
-	invite: { zh: "摇人", en: "Invite" },
+	invite: { zh: "邀请", en: "Invite" },
 	stats: { zh: "统计", en: "Stats" },
 	profile: { zh: "生涯", en: "Career" },
 	log: { zh: "记录", en: "Log" },
@@ -491,7 +491,7 @@ registerStrings("sync", {
 });
 
 registerStrings("invite", {
-	title: { zh: "摇人", en: "Invite players" },
+	title: { zh: "邀请", en: "Invite players" },
 	pendingHint: {
 		zh: "把每个座位的链接私发给对应的人。他们可以先打开链接等着，你点「开始」后就会看到自己的牌。",
 		en: "Send each seat link privately to the matching player. They can open it and wait; their cards appear when you start the hand.",
@@ -501,11 +501,11 @@ registerStrings("invite", {
 		en: "The game is running. Send each seat link privately; opening it seats that player.",
 	},
 	keepSeats: {
-		zh: "摇人后不要再改座位顺序或名字，否则链接会对错人。",
+		zh: "邀请后不要再改座位顺序或名字，否则链接会对错人。",
 		en: "Do not reorder seats or rename players after inviting, or links will point at the wrong seat.",
 	},
 	needTwoPlayers: {
-		zh: "先给至少两个座位填上名字，再摇人。留空的座位会自动变机器人。",
+		zh: "先给至少两个座位填上名字，再邀请。留空的座位会自动变机器人。",
 		en: "Type at least two player names first. Empty seats become bots.",
 	},
 	noRelay: {

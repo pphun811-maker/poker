@@ -10,9 +10,19 @@ Version log writing guide:
 - Add optional contributor credits as dedicated metadata instead of release notes.
 */
 
-export const APP_VERSION = "1.8.0";
+export const APP_VERSION = "1.8.1";
 
 export const VERSION_LOG = [
+	{
+		version: "1.8.1",
+		date: "2026-11-21",
+		title: "Clearer invite wording",
+		notes: [
+			"The Chinese invite entry now reads 邀请 instead of slang, matching the English Invite label.",
+			"The invite panel title and hints use the same wording in both languages.",
+		],
+		estimated: false,
+	},
 	{
 		version: "1.8.0",
 		date: "2026-11-21",
