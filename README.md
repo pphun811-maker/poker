@@ -167,9 +167,10 @@ and `render.yaml` is a ready Render blueprint.
 1. Push this repo to GitHub.
 2. Open [Render](https://dashboard.render.com/) → **New** → **Blueprint** → connect the repo.
    Render reads `render.yaml`, builds the `Dockerfile`, and starts the service.
-3. Copy the service URL, for example `https://poker-sync-xxxx.onrender.com`.
+3. Copy the service URL, for example `https://poker-sync.onrender.com`.
 4. Set it in `js/syncConfig.js`, or open the host site once with `?sync=<url>`; seat links copy it
-   to every guest device.
+   to every guest device. This repository's public build already defaults to
+   `https://poker-sync.onrender.com`; change it if you deploy your own relay.
 
 Render's free web service sleeps after about 15 minutes without traffic and wakes in about a minute.
 Open `<url>/health` a minute before playing. Storage is in memory, so after a wake or restart start

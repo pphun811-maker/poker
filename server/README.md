@@ -325,9 +325,9 @@ python -m http.server 8000     # 另开一个终端
 1. 把仓库推到 GitHub。
 2. [Render Dashboard](https://dashboard.render.com/) → New → Blueprint → 连接仓库；Render 会读取
    `render.yaml`，用 `Dockerfile` 构建并启动服务。
-3. 复制服务地址，例如 `https://poker-sync-xxxx.onrender.com`。
+3. 复制服务地址，例如 `https://poker-sync.onrender.com`。
 4. 填到 `js/syncConfig.js` 的 `DEFAULT_SYNC_BASE_URL`，或房主首次打开页面时用
-   `?sync=https://poker-sync-xxxx.onrender.com`。
+   `?sync=https://poker-sync.onrender.com`。本仓库的公开版本默认已指向该地址；自己另部署时再改。
 
 Render 免费服务约 15 分钟无流量后休眠，冷启动约 1 分钟；存储是进程内内存，休眠/重启后从空开始。
 开打前先访问 `<地址>/health` 唤醒，再开新局。

@@ -14,7 +14,7 @@ const QUERY_KEY = "sync";
 
 // Set after deploying server/sync.js (for example https://poker-sync.example.deno.net).
 // Leaving it empty keeps online seats disabled until a relay is configured.
-const DEFAULT_SYNC_BASE_URL = "";
+const DEFAULT_SYNC_BASE_URL = "https://poker-sync.onrender.com";
 
 function normalizeBaseUrl(value) {
 	if (typeof value !== "string" || value.trim() === "") {
